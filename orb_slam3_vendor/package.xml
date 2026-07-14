@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>orb_slam3_vendor</name>
+  <version>1.0.0</version>
+  <description>Vendor package for the official ORB-SLAM3 library.</description>
+  <maintainer email="duc@example.com">duc</maintainer>
+  <license>GPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_cmake_gtest</depend>
+  <depend>boost</depend>
+  <depend>eigen</depend>
+  <depend>libopencv-dev</depend>
+  <depend>openssl</depend>
+  <depend>python3</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
