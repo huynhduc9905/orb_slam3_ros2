@@ -20,11 +20,11 @@ class SnapshotCullingGate {
     condition_.wait(lock, [this] { return allow_snapshot_capture_; });
   }
 
-  void OnBadKeyframeMapLookup() {
+  void OnBadKeyframeConnectionsLocked() {
     std::unique_lock<std::mutex> lock(mutex_);
-    bad_keyframe_map_lookup_entered_ = true;
+    bad_keyframe_connections_locked_ = true;
     condition_.notify_all();
-    condition_.wait(lock, [this] { return allow_bad_keyframe_map_lookup_; });
+    condition_.wait(lock, [this] { return allow_bad_keyframe_connections_locked_; });
   }
 
   void WaitForSnapshotCapture() {
@@ -32,9 +32,9 @@ class SnapshotCullingGate {
     condition_.wait(lock, [this] { return snapshot_capture_entered_; });
   }
 
-  void WaitForBadKeyframeMapLookup() {
+  void WaitForBadKeyframeConnectionsLocked() {
     std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this] { return bad_keyframe_map_lookup_entered_; });
+    condition_.wait(lock, [this] { return bad_keyframe_connections_locked_; });
   }
 
   void AllowSnapshotCapture() {
@@ -43,9 +43,9 @@ class SnapshotCullingGate {
     condition_.notify_all();
   }
 
-  void AllowBadKeyframeMapLookup() {
+  void AllowBadKeyframeConnectionsLocked() {
     std::lock_guard<std::mutex> lock(mutex_);
-    allow_bad_keyframe_map_lookup_ = true;
+    allow_bad_keyframe_connections_locked_ = true;
     condition_.notify_all();
   }
 
@@ -53,9 +53,9 @@ class SnapshotCullingGate {
   std::condition_variable condition_;
   std::mutex mutex_;
   bool snapshot_capture_entered_{false};
-  bool bad_keyframe_map_lookup_entered_{false};
+  bool bad_keyframe_connections_locked_{false};
   bool allow_snapshot_capture_{false};
-  bool allow_bad_keyframe_map_lookup_{false};
+  bool allow_bad_keyframe_connections_locked_{false};
 };
 
 }  // namespace
@@ -138,22 +138,22 @@ TEST(SnapshotConcurrency, CapturesGraphWhileCullingKeyframe) {
 
   ORB_SLAM3::Map::SetSnapshotCaptureTestHook(
       [&gate] { gate.OnSnapshotCapture(); });
-  ORB_SLAM3::KeyFrame::SetBadKeyframeMapLookupTestHook(
-      [&gate] { gate.OnBadKeyframeMapLookup(); });
+  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook(
+      [&gate] { gate.OnBadKeyframeConnectionsLocked(); });
+
+  std::thread culling_thread([&culled_keyframe] { culled_keyframe.SetBadFlag(); });
+  gate.WaitForBadKeyframeConnectionsLocked();
 
   std::thread snapshot_thread([&map] { map.GetGraphSnapshotData(); });
   gate.WaitForSnapshotCapture();
 
-  std::thread culling_thread([&culled_keyframe] { culled_keyframe.SetBadFlag(); });
-  gate.WaitForBadKeyframeMapLookup();
-
+  gate.AllowBadKeyframeConnectionsLocked();
   gate.AllowSnapshotCapture();
-  gate.AllowBadKeyframeMapLookup();
   snapshot_thread.join();
   culling_thread.join();
 
   ORB_SLAM3::Map::SetSnapshotCaptureTestHook({});
-  ORB_SLAM3::KeyFrame::SetBadKeyframeMapLookupTestHook({});
+  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook({});
 
   EXPECT_TRUE(culled_keyframe.isBad());
   const auto snapshot = map.GetGraphSnapshotData();
