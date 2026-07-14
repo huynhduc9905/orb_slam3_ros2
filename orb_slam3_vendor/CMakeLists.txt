@@ -29,6 +29,12 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(vendor_link_test test/vendor_link_test.cpp)
   target_link_libraries(vendor_link_test ORB_SLAM3::ORB_SLAM3)
+  add_test(NAME installed_consumer
+    COMMAND ${CMAKE_COMMAND}
+      -DTEST_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/installed_consumer
+      -DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/installed_consumer
+      -DINSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/run_installed_consumer.cmake)
 endif()
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vocabulary/ORBvoc.txt"
