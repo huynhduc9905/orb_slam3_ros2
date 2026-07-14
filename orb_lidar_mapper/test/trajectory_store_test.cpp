@@ -44,6 +44,38 @@ TEST(TrajectoryStore, RecomputesClosedProvisionalScansWhenLateWheelEndpointArriv
   EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{0.9, 0, 0}, 1e-12));
 }
 
+TEST(TrajectoryStore, RecomputesClosedIntervalWhenNewestWheelEndpointIsReplaced) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  ASSERT_TRUE(store.addWheel({0, Pose2{0, 0, 0}}));
+  ASSERT_TRUE(store.addWheel({100, Pose2{1, 0, 0}}));
+  ASSERT_TRUE(store.addWheel({200, Pose2{2, 0, 0}}));
+  ASSERT_TRUE(store.addWheel({300, Pose2{3, 0, 0}}));
+  store.addTrackedFrame(makeOkFrame(0, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame({0, TrackingState::kLost, false, 7, 1, Pose2{}, Pose2{}, Pose2{}});
+  ASSERT_TRUE(store.placeScan(250).has_value());
+  store.addTrackedFrame(makeOkFrame(300, Pose2{2.7, 0, 0}, 7, 2, Pose2{3, 0, 0}));
+  ASSERT_TRUE(store.snapshot()->scans[0].pose.isApprox(Pose2{2.25, 0, 0}, 1e-12));
+
+  ASSERT_TRUE(store.addWheel({300, Pose2{4, 0, 0}}));
+
+  const auto revision = store.snapshot();
+  ASSERT_TRUE(revision->scans[0].committed);
+  EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{2.7, 0, 0}, 1e-12));
+}
+
+TEST(TrajectoryStore, BoundsWheelStateDuringAnUnresolvedLossInterval) {
+  TrajectoryStore store({10, 1});
+  ASSERT_TRUE(store.addWheel({0, Pose2{}}));
+  store.addTrackedFrame(makeOkFrame(0, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame({0, TrackingState::kLost, false, 7, 1, Pose2{}, Pose2{}, Pose2{}});
+
+  for (std::int64_t stamp = 1; stamp <= 1'000; ++stamp) {
+    ASSERT_TRUE(store.addWheel({stamp, Pose2{static_cast<double>(stamp), 0, 0}}));
+  }
+
+  EXPECT_LE(store.wheelStateCount(), 12U);
+}
+
 TEST(TrajectoryStore, ClosesStationaryIntervalsAcrossFullTimestampDomainWithoutOverflow) {
   TrajectoryStore store({std::numeric_limits<std::int64_t>::max(),
                          std::numeric_limits<std::int64_t>::max()});

@@ -23,6 +23,8 @@ struct TrajectoryStore::LossInterval {
   std::size_t start_frame{};
   std::int64_t loss_stamp_ns{};
   std::optional<std::size_t> end_frame;
+  std::optional<double> start_cumulative_distance;
+  std::optional<double> end_cumulative_distance;
   std::optional<double> total_distance;
 };
 
@@ -31,6 +33,7 @@ struct TrajectoryStore::StoredScan {
   std::optional<std::size_t> anchor_frame;
   std::optional<std::size_t> interval;
   std::optional<Pose2> wheel_pose;
+  std::optional<double> wheel_cumulative_distance;
   std::optional<double> correction_alpha;
 };
 
@@ -45,16 +48,29 @@ bool TrajectoryStore::addWheel(TimedPose2 sample) {
   if (!wheels_.push(sample)) {
     return false;
   }
-  if (!wheel_history_.empty() && wheel_history_.back().stamp_ns == sample.stamp_ns) {
-    wheel_history_.back() = sample;
+  if (!wheel_states_.empty() && wheel_states_.back().stamp_ns == sample.stamp_ns) {
+    WheelState& state = wheel_states_.back();
+    state.pose = sample.pose;
+    if (wheel_states_.size() > 1) {
+      const WheelState& previous = wheel_states_[wheel_states_.size() - 2];
+      state.cumulative_distance = previous.cumulative_distance +
+        translationDistance(previous.pose, state.pose);
+    }
   } else {
-    wheel_history_.push_back(sample);
+    const double cumulative_distance = wheel_states_.empty() ? 0.0 :
+      wheel_states_.back().cumulative_distance +
+      translationDistance(wheel_states_.back().pose, sample.pose);
+    wheel_states_.push_back({sample.stamp_ns, sample.pose, cumulative_distance});
+    if (!wheel_origin_) {
+      wheel_origin_ = wheel_states_.back();
+    }
   }
+  refreshWheelData();
   for (std::size_t interval_index = 0; interval_index < intervals_.size(); ++interval_index) {
     finalizeInterval(interval_index);
   }
   recomputeAll();
-  pruneWheelHistory();
+  pruneWheelStates();
   publish();
   return true;
 }
@@ -75,11 +91,14 @@ void TrajectoryStore::addTrackedFrame(FrameAnchor frame) {
              !open_interval_) {
     const auto anchor = latestValidFrameAt(added.stamp_ns);
     if (anchor) {
-      intervals_.push_back({*anchor, added.stamp_ns, std::nullopt, std::nullopt});
+      const FrameAnchor& start = frames_[*anchor];
+      intervals_.push_back({*anchor, added.stamp_ns, std::nullopt,
+                            wheelCumulativeDistance(start.stamp_ns, start.wheel_pose),
+                            std::nullopt, std::nullopt});
       open_interval_ = intervals_.size() - 1;
     }
   }
-  pruneWheelHistory();
+  pruneWheelStates();
   publish();
 }
 
@@ -103,21 +122,30 @@ std::optional<Pose2> TrajectoryStore::poseFromFrame(
   return anchor.map_pose * anchor.wheel_pose.inverse() * *scan_wheel_pose;
 }
 
-std::optional<double> TrajectoryStore::cumulativeWheelDistance(
-  std::int64_t from_ns, const Pose2& from_pose, std::int64_t to_ns, const Pose2& to_pose) const {
-  if (to_ns < from_ns || !wheels_.interpolate(to_ns)) {
+std::optional<double> TrajectoryStore::wheelCumulativeDistance(
+  std::int64_t stamp_ns, const Pose2& pose) const {
+  if (wheel_origin_ && stamp_ns == wheel_origin_->stamp_ns) {
+    return wheel_origin_->cumulative_distance;
+  }
+  if (wheel_states_.empty() || stamp_ns < wheel_states_.front().stamp_ns ||
+      stamp_ns > wheel_states_.back().stamp_ns) {
     return std::nullopt;
   }
-  Pose2 previous = from_pose;
-  double distance = 0.0;
-  for (const TimedPose2& sample : wheel_history_) {
-    if (sample.stamp_ns <= from_ns || sample.stamp_ns >= to_ns) {
-      continue;
+  for (std::size_t index = 0; index < wheel_states_.size(); ++index) {
+    const WheelState& state = wheel_states_[index];
+    if (state.stamp_ns == stamp_ns) {
+      if (index == 0) {
+        return state.cumulative_distance;
+      }
+      const WheelState& previous = wheel_states_[index - 1];
+      return previous.cumulative_distance + translationDistance(previous.pose, pose);
     }
-    distance += translationDistance(previous, sample.pose);
-    previous = sample.pose;
+    if (state.stamp_ns > stamp_ns) {
+      const WheelState& previous = wheel_states_[index - 1];
+      return previous.cumulative_distance + translationDistance(previous.pose, pose);
+    }
   }
-  return distance + translationDistance(previous, to_pose);
+  return std::nullopt;
 }
 
 std::optional<ScanPose> TrajectoryStore::placeScan(std::int64_t stamp_ns) {
@@ -130,6 +158,7 @@ std::optional<ScanPose> TrajectoryStore::placeScan(std::int64_t stamp_ns) {
     return std::nullopt;
   }
   scan.wheel_pose = *scan_wheel_pose;
+  scan.wheel_cumulative_distance = wheelCumulativeDistance(stamp_ns, *scan.wheel_pose);
 
   if (open_interval_) {
     const LossInterval& interval = intervals_[*open_interval_];
@@ -187,7 +216,7 @@ void TrajectoryStore::recomputeScan(StoredScan& scan) {
 
 void TrajectoryStore::finalizeInterval(std::size_t interval_index) {
   LossInterval& interval = intervals_[interval_index];
-  if (!interval.end_frame || interval.total_distance) {
+  if (!interval.end_frame) {
     return;
   }
   const FrameAnchor& start = frames_[interval.start_frame];
@@ -195,41 +224,67 @@ void TrajectoryStore::finalizeInterval(std::size_t interval_index) {
   if (end.stamp_ns < start.stamp_ns) {
     return;
   }
-  const auto total = cumulativeWheelDistance(start.stamp_ns, start.wheel_pose,
-                                             end.stamp_ns, end.wheel_pose);
-  if (!total) {
+  if (!interval.start_cumulative_distance) {
+    interval.start_cumulative_distance =
+      wheelCumulativeDistance(start.stamp_ns, start.wheel_pose);
+  }
+  interval.end_cumulative_distance = wheelCumulativeDistance(end.stamp_ns, end.wheel_pose);
+  if (!interval.start_cumulative_distance || !interval.end_cumulative_distance) {
     return;
   }
-  interval.total_distance = *total;
+  interval.total_distance = *interval.end_cumulative_distance -
+    *interval.start_cumulative_distance;
   const auto duration = orderedDuration(start.stamp_ns, end.stamp_ns);
   for (StoredScan& scan : scans_) {
     if (scan.interval != interval_index || scan.value.stamp_ns < start.stamp_ns ||
         scan.value.stamp_ns > end.stamp_ns) {
       continue;
     }
-    const auto distance = cumulativeWheelDistance(start.stamp_ns, start.wheel_pose,
-                                                  scan.value.stamp_ns, *scan.wheel_pose);
-    if (!distance) {
+    if (!scan.wheel_cumulative_distance) {
       continue;
     }
-    scan.correction_alpha = *total < kDistanceEpsilon
+    const double distance = *scan.wheel_cumulative_distance -
+      *interval.start_cumulative_distance;
+    scan.correction_alpha = *interval.total_distance < kDistanceEpsilon
       ? (duration == 0 ? 1.0 : static_cast<double>(orderedDuration(start.stamp_ns, scan.value.stamp_ns)) /
                             static_cast<double>(duration))
-      : *distance / *total;
+      : distance / *interval.total_distance;
   }
 }
 
-void TrajectoryStore::pruneWheelHistory() {
-  if (wheel_history_.empty()) {
+void TrajectoryStore::refreshWheelData() {
+  for (StoredScan& scan : scans_) {
+    const auto wheel_pose = wheels_.interpolate(scan.value.stamp_ns);
+    const auto cumulative_distance = wheel_pose
+      ? wheelCumulativeDistance(scan.value.stamp_ns, *wheel_pose) : std::nullopt;
+    if (wheel_pose && cumulative_distance) {
+      scan.wheel_pose = *wheel_pose;
+      scan.wheel_cumulative_distance = *cumulative_distance;
+    }
+  }
+  for (LossInterval& interval : intervals_) {
+    const FrameAnchor& start = frames_[interval.start_frame];
+    if (const auto cumulative = wheelCumulativeDistance(start.stamp_ns, start.wheel_pose)) {
+      interval.start_cumulative_distance = *cumulative;
+    }
+    if (interval.end_frame) {
+      const FrameAnchor& end = frames_[*interval.end_frame];
+      if (const auto cumulative = wheelCumulativeDistance(end.stamp_ns, end.wheel_pose)) {
+        interval.end_cumulative_distance = *cumulative;
+      }
+    }
+  }
+}
+
+void TrajectoryStore::pruneWheelStates() {
+  if (wheel_states_.empty()) {
     return;
   }
-  const std::int64_t newest = wheel_history_.back().stamp_ns;
-  const std::int64_t required_from = open_interval_
-    ? frames_[intervals_[*open_interval_].start_frame].stamp_ns : newest;
+  const std::int64_t newest = wheel_states_.back().stamp_ns;
   const auto retention = static_cast<std::uint64_t>(config_.wheel_retention_ns);
-  while (wheel_history_.size() > 1 && wheel_history_.front().stamp_ns < required_from &&
-         orderedDuration(wheel_history_.front().stamp_ns, newest) > retention) {
-    wheel_history_.erase(wheel_history_.begin());
+  while (!wheel_states_.empty() &&
+         orderedDuration(wheel_states_.front().stamp_ns, newest) > retention) {
+    wheel_states_.erase(wheel_states_.begin());
   }
 }
 
@@ -289,6 +344,10 @@ std::size_t TrajectoryStore::unresolvedScanCount() const {
     }
   }
   return count;
+}
+
+std::size_t TrajectoryStore::wheelStateCount() const noexcept {
+  return wheel_states_.size() + (wheel_origin_ ? 1U : 0U);
 }
 
 }  // namespace orb_lidar_mapper

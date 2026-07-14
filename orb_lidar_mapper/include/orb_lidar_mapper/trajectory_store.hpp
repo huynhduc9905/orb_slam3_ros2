@@ -65,25 +65,32 @@ class TrajectoryStore {
   bool applyGraphSnapshot(const GraphSnapshotValue& snapshot);
   std::shared_ptr<const TrajectoryRevision> snapshot() const;
   std::size_t unresolvedScanCount() const;
+  std::size_t wheelStateCount() const noexcept;
 
  private:
   struct LossInterval;
   struct StoredScan;
+  struct WheelState {
+    std::int64_t stamp_ns{};
+    Pose2 pose;
+    double cumulative_distance{};
+  };
 
   void recomputeAll();
   void recomputeScan(StoredScan& scan);
   std::optional<std::size_t> latestValidFrameAt(std::int64_t stamp_ns) const;
   std::optional<Pose2> poseFromFrame(std::size_t frame_index, std::int64_t stamp_ns) const;
-  std::optional<double> cumulativeWheelDistance(
-    std::int64_t from_ns, const Pose2& from_pose, std::int64_t to_ns,
-    const Pose2& to_pose) const;
+  std::optional<double> wheelCumulativeDistance(
+    std::int64_t stamp_ns, const Pose2& pose) const;
   void finalizeInterval(std::size_t interval_index);
-  void pruneWheelHistory();
+  void refreshWheelData();
+  void pruneWheelStates();
   void publish();
 
   TimedPoseBuffer wheels_;
   TrajectoryConfig config_;
-  std::vector<TimedPose2> wheel_history_;
+  std::optional<WheelState> wheel_origin_;
+  std::vector<WheelState> wheel_states_;
   std::vector<FrameAnchor> frames_;
   std::vector<StoredScan> scans_;
   std::vector<LossInterval> intervals_;
