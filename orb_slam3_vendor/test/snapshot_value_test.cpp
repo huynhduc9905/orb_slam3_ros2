@@ -8,54 +8,57 @@
 #include <algorithm>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace {
 
-class SnapshotCullingGate {
+class ConcurrentStart {
  public:
-  void OnSnapshotCapture() {
+  void ArriveAndWait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    snapshot_capture_entered_ = true;
+    ++arrived_;
     condition_.notify_all();
-    condition_.wait(lock, [this] { return allow_snapshot_capture_; });
+    condition_.wait(lock, [this] { return started_; });
   }
 
-  void OnBadKeyframeConnectionsLocked() {
+  void WaitForBoth() {
     std::unique_lock<std::mutex> lock(mutex_);
-    bad_keyframe_connections_locked_ = true;
-    condition_.notify_all();
-    condition_.wait(lock, [this] { return allow_bad_keyframe_connections_locked_; });
+    condition_.wait(lock, [this] { return arrived_ == 2; });
   }
 
-  void WaitForSnapshotCapture() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this] { return snapshot_capture_entered_; });
-  }
-
-  void WaitForBadKeyframeConnectionsLocked() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this] { return bad_keyframe_connections_locked_; });
-  }
-
-  void AllowSnapshotCapture() {
+  void Start() {
     std::lock_guard<std::mutex> lock(mutex_);
-    allow_snapshot_capture_ = true;
-    condition_.notify_all();
-  }
-
-  void AllowBadKeyframeConnectionsLocked() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    allow_bad_keyframe_connections_locked_ = true;
+    started_ = true;
     condition_.notify_all();
   }
 
  private:
   std::condition_variable condition_;
   std::mutex mutex_;
-  bool snapshot_capture_entered_{false};
-  bool bad_keyframe_connections_locked_{false};
-  bool allow_snapshot_capture_{false};
-  bool allow_bad_keyframe_connections_locked_{false};
+  int arrived_{0};
+  bool started_{false};
+};
+
+enum class BadKeyframeEvent {
+  kMapInitKFidAttempt,
+  kConnectionsAcquired,
+};
+
+class BadKeyframeOrderRecorder {
+ public:
+  void Record(BadKeyframeEvent event) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.push_back(event);
+  }
+
+  std::vector<BadKeyframeEvent> Events() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return events_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<BadKeyframeEvent> events_;
 };
 
 }  // namespace
@@ -127,7 +130,7 @@ TEST(SnapshotConcurrency, CapturesGraphWhileCullingKeyframe) {
   ORB_SLAM3::KeyFrame initial_keyframe;
   ORB_SLAM3::KeyFrame culled_keyframe;
   ORB_SLAM3::KeyFrameDatabase keyframe_database;
-  SnapshotCullingGate gate;
+  ConcurrentStart start;
 
   initial_keyframe.mnId = 1;
   culled_keyframe.mnId = 2;
@@ -136,24 +139,18 @@ TEST(SnapshotConcurrency, CapturesGraphWhileCullingKeyframe) {
   map.AddKeyFrame(&initial_keyframe);
   map.AddKeyFrame(&culled_keyframe);
 
-  ORB_SLAM3::Map::SetSnapshotCaptureTestHook(
-      [&gate] { gate.OnSnapshotCapture(); });
-  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook(
-      [&gate] { gate.OnBadKeyframeConnectionsLocked(); });
-
-  std::thread culling_thread([&culled_keyframe] { culled_keyframe.SetBadFlag(); });
-  gate.WaitForBadKeyframeConnectionsLocked();
-
-  std::thread snapshot_thread([&map] { map.GetGraphSnapshotData(); });
-  gate.WaitForSnapshotCapture();
-
-  gate.AllowBadKeyframeConnectionsLocked();
-  gate.AllowSnapshotCapture();
+  std::thread culling_thread([&] {
+    start.ArriveAndWait();
+    culled_keyframe.SetBadFlag();
+  });
+  std::thread snapshot_thread([&] {
+    start.ArriveAndWait();
+    map.GetGraphSnapshotData();
+  });
+  start.WaitForBoth();
+  start.Start();
   snapshot_thread.join();
   culling_thread.join();
-
-  ORB_SLAM3::Map::SetSnapshotCaptureTestHook({});
-  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook({});
 
   EXPECT_TRUE(culled_keyframe.isBad());
   const auto snapshot = map.GetGraphSnapshotData();
@@ -163,6 +160,34 @@ TEST(SnapshotConcurrency, CapturesGraphWhileCullingKeyframe) {
       [](const ORB_SLAM3::KeyframeSnapshot& keyframe) { return keyframe.id == 2U; });
   ASSERT_NE(culled_snapshot, snapshot.keyframes.end());
   EXPECT_TRUE(culled_snapshot->bad);
+}
+
+TEST(SnapshotConcurrency, CullingLooksUpMapBeforeLockingConnections) {
+  ORB_SLAM3::Map map;
+  ORB_SLAM3::KeyFrame initial_keyframe;
+  ORB_SLAM3::KeyFrame culled_keyframe;
+  ORB_SLAM3::KeyFrameDatabase keyframe_database;
+  BadKeyframeOrderRecorder recorder;
+
+  initial_keyframe.mnId = 1;
+  culled_keyframe.mnId = 2;
+  culled_keyframe.UpdateMap(&map);
+  culled_keyframe.SetKeyFrameDatabaseForTesting(&keyframe_database);
+  map.AddKeyFrame(&initial_keyframe);
+  map.AddKeyFrame(&culled_keyframe);
+
+  ORB_SLAM3::KeyFrame::SetBadKeyframeMapInitKFidAttemptTestHook(
+      [&] { recorder.Record(BadKeyframeEvent::kMapInitKFidAttempt); });
+  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook(
+      [&] { recorder.Record(BadKeyframeEvent::kConnectionsAcquired); });
+  culled_keyframe.SetBadFlag();
+  ORB_SLAM3::KeyFrame::SetBadKeyframeMapInitKFidAttemptTestHook({});
+  ORB_SLAM3::KeyFrame::SetBadKeyframeConnectionsLockedTestHook({});
+
+  const auto events = recorder.Events();
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events[0], BadKeyframeEvent::kMapInitKFidAttempt);
+  EXPECT_EQ(events[1], BadKeyframeEvent::kConnectionsAcquired);
 }
 
 TEST(SnapshotGraphState, AdvancesForIdentityPreservingMapReplacement) {
