@@ -39,6 +39,12 @@ if(BUILD_TESTING)
   target_compile_definitions(snapshot_value_test PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
   target_link_libraries(snapshot_value_test ORB_SLAM3::ORB_SLAM3)
   set_tests_properties(snapshot_value_test PROPERTIES TIMEOUT 10)
+  ament_add_gtest(system_shutdown_test test/system_shutdown_test.cpp)
+  target_link_libraries(system_shutdown_test ORB_SLAM3::ORB_SLAM3)
+  set_tests_properties(system_shutdown_test PROPERTIES
+    TIMEOUT 30
+    ENVIRONMENT
+      "ORB_TEST_VOCAB=${CMAKE_CURRENT_BINARY_DIR}/vocabulary/ORBvoc.txt;ORB_TEST_SETTINGS=${CMAKE_CURRENT_SOURCE_DIR}/../orb_slam3_wrapper/config/tasterobot_stereo.yaml")
   add_test(NAME installed_consumer
     COMMAND ${CMAKE_COMMAND}
       -DTEST_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/installed_consumer
