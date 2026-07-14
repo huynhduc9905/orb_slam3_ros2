@@ -1,7 +1,64 @@
 #include <gtest/gtest.h>
 #include <KeyFrame.h>
+#include <KeyFrameDatabase.h>
 #include <Map.h>
 #include <SystemSnapshots.h>
+
+#include <condition_variable>
+#include <algorithm>
+#include <mutex>
+#include <thread>
+
+namespace {
+
+class SnapshotCullingGate {
+ public:
+  void OnSnapshotCapture() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    snapshot_capture_entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return allow_snapshot_capture_; });
+  }
+
+  void OnBadKeyframeMapLookup() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    bad_keyframe_map_lookup_entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this] { return allow_bad_keyframe_map_lookup_; });
+  }
+
+  void WaitForSnapshotCapture() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this] { return snapshot_capture_entered_; });
+  }
+
+  void WaitForBadKeyframeMapLookup() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this] { return bad_keyframe_map_lookup_entered_; });
+  }
+
+  void AllowSnapshotCapture() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    allow_snapshot_capture_ = true;
+    condition_.notify_all();
+  }
+
+  void AllowBadKeyframeMapLookup() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    allow_bad_keyframe_map_lookup_ = true;
+    condition_.notify_all();
+  }
+
+ private:
+  std::condition_variable condition_;
+  std::mutex mutex_;
+  bool snapshot_capture_entered_{false};
+  bool bad_keyframe_map_lookup_entered_{false};
+  bool allow_snapshot_capture_{false};
+  bool allow_bad_keyframe_map_lookup_{false};
+};
+
+}  // namespace
 
 TEST(SnapshotValue, OwnsPoseAndRelationshipData) {
   ORB_SLAM3::KeyframeSnapshot keyframe;
@@ -63,6 +120,49 @@ TEST(SnapshotValue, RetainsErasedKeyframeValuesAfterKeyframeLifetimeEnds) {
   EXPECT_TRUE(snapshot.keyframes.front().bad);
   EXPECT_TRUE(snapshot.keyframes.front().T_world_camera.translation().isApprox(
       Eigen::Vector3f(-1.0F, -2.0F, -3.0F)));
+}
+
+TEST(SnapshotConcurrency, CapturesGraphWhileCullingKeyframe) {
+  ORB_SLAM3::Map map;
+  ORB_SLAM3::KeyFrame initial_keyframe;
+  ORB_SLAM3::KeyFrame culled_keyframe;
+  ORB_SLAM3::KeyFrameDatabase keyframe_database;
+  SnapshotCullingGate gate;
+
+  initial_keyframe.mnId = 1;
+  culled_keyframe.mnId = 2;
+  culled_keyframe.UpdateMap(&map);
+  culled_keyframe.SetKeyFrameDatabaseForTesting(&keyframe_database);
+  map.AddKeyFrame(&initial_keyframe);
+  map.AddKeyFrame(&culled_keyframe);
+
+  ORB_SLAM3::Map::SetSnapshotCaptureTestHook(
+      [&gate] { gate.OnSnapshotCapture(); });
+  ORB_SLAM3::KeyFrame::SetBadKeyframeMapLookupTestHook(
+      [&gate] { gate.OnBadKeyframeMapLookup(); });
+
+  std::thread snapshot_thread([&map] { map.GetGraphSnapshotData(); });
+  gate.WaitForSnapshotCapture();
+
+  std::thread culling_thread([&culled_keyframe] { culled_keyframe.SetBadFlag(); });
+  gate.WaitForBadKeyframeMapLookup();
+
+  gate.AllowSnapshotCapture();
+  gate.AllowBadKeyframeMapLookup();
+  snapshot_thread.join();
+  culling_thread.join();
+
+  ORB_SLAM3::Map::SetSnapshotCaptureTestHook({});
+  ORB_SLAM3::KeyFrame::SetBadKeyframeMapLookupTestHook({});
+
+  EXPECT_TRUE(culled_keyframe.isBad());
+  const auto snapshot = map.GetGraphSnapshotData();
+  ASSERT_EQ(snapshot.keyframes.size(), 2U);
+  const auto culled_snapshot = std::find_if(
+      snapshot.keyframes.begin(), snapshot.keyframes.end(),
+      [](const ORB_SLAM3::KeyframeSnapshot& keyframe) { return keyframe.id == 2U; });
+  ASSERT_NE(culled_snapshot, snapshot.keyframes.end());
+  EXPECT_TRUE(culled_snapshot->bad);
 }
 
 TEST(SnapshotGraphState, AdvancesForIdentityPreservingMapReplacement) {
