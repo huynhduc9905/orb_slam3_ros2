@@ -43,5 +43,27 @@ TEST(Pose2, InterpolatesAcrossPiByShortestArc) {
   EXPECT_NEAR(std::abs(Pose2::interpolate(a, b, 0.5).yaw), M_PI, 0.02);
 }
 
+TEST(Pose2, ExpAndLogRoundTrip) {
+  const Twist2 twist{1.3, -0.7, 0.9};
+  const Twist2 recovered = Pose2::exp(twist).log();
+  EXPECT_NEAR(recovered.vx, twist.vx, 1e-12);
+  EXPECT_NEAR(recovered.vy, twist.vy, 1e-12);
+  EXPECT_NEAR(recovered.omega, twist.omega, 1e-12);
+}
+
+TEST(Pose2, ExpAndLogRoundTripThroughSmallAngleBranch) {
+  const Twist2 twist{1.3, -0.7, 1e-10};
+  const Twist2 recovered = Pose2::exp(twist).log();
+  EXPECT_NEAR(recovered.vx, twist.vx, 1e-12);
+  EXPECT_NEAR(recovered.vy, twist.vy, 1e-12);
+  EXPECT_NEAR(recovered.omega, twist.omega, 1e-16);
+}
+
+TEST(Pose2, PowClampsAlphaToUnitInterval) {
+  const Pose2 pose{1.0, -2.0, 0.4};
+  EXPECT_TRUE(pose.pow(-0.5).isApprox(Pose2{}, 1e-12));
+  EXPECT_TRUE(pose.pow(1.5).isApprox(pose, 1e-12));
+}
+
 }  // namespace
 }  // namespace orb_lidar_mapper

@@ -1,4 +1,7 @@
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -32,6 +35,21 @@ TEST(TimedPoseBuffer, RejectsOutOfOrderSample) {
   EXPECT_EQ(buffer.size(), 1U);
 }
 
+TEST(TimedPoseBuffer, ReplacesNewestSampleWithEqualTimestamp) {
+  TimedPoseBuffer buffer(100, 100);
+  EXPECT_TRUE(buffer.push({42, Pose2{1.0, 0.0, 0.0}}));
+  EXPECT_TRUE(buffer.push({42, Pose2{2.0, 0.0, 0.0}}));
+  EXPECT_EQ(buffer.size(), 1U);
+  const auto result = buffer.interpolate(42);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->isApprox(Pose2{2.0, 0.0, 0.0}, 1e-12));
+}
+
+TEST(TimedPoseBuffer, RejectsNegativeConfiguration) {
+  EXPECT_THROW(TimedPoseBuffer(-1, 0), std::invalid_argument);
+  EXPECT_THROW(TimedPoseBuffer(0, -1), std::invalid_argument);
+}
+
 TEST(TimedPoseBuffer, RetainsOnlyConfiguredWindow) {
   TimedPoseBuffer buffer(100, 100);
   EXPECT_TRUE(buffer.push({0, Pose2{}}));
@@ -46,6 +64,41 @@ TEST(TimedPoseBuffer, RejectsInterpolationAcrossStaleGap) {
   buffer.push({0, Pose2{0, 0, 0}});
   buffer.push({200'000'000, Pose2{1, 0, 0}});
   EXPECT_FALSE(buffer.interpolate(100'000'000).has_value());
+}
+
+TEST(TimedPoseBuffer, AcceptsInterpolationAtExactMaximumGap) {
+  TimedPoseBuffer buffer(100, 100);
+  EXPECT_TRUE(buffer.push({0, Pose2{0.0, 0.0, 0.0}}));
+  EXPECT_TRUE(buffer.push({100, Pose2{2.0, 0.0, 0.0}}));
+  const auto result = buffer.interpolate(50);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result->isApprox(Pose2{1.0, 0.0, 0.0}, 1e-12));
+}
+
+TEST(TimedPoseBuffer, AcceptsEndpointsAndRejectsOutOfRangeTimestamps) {
+  TimedPoseBuffer buffer(100, 100);
+  EXPECT_TRUE(buffer.push({10, Pose2{1.0, 0.0, 0.0}}));
+  EXPECT_TRUE(buffer.push({20, Pose2{2.0, 0.0, 0.0}}));
+  EXPECT_TRUE(buffer.interpolate(10).has_value());
+  EXPECT_TRUE(buffer.interpolate(20).has_value());
+  EXPECT_FALSE(buffer.interpolate(9).has_value());
+  EXPECT_FALSE(buffer.interpolate(21).has_value());
+}
+
+TEST(TimedPoseBuffer, RetentionHandlesFullInt64TimestampRange) {
+  TimedPoseBuffer buffer(std::numeric_limits<std::int64_t>::max(),
+                         std::numeric_limits<std::int64_t>::max());
+  EXPECT_TRUE(buffer.push({std::numeric_limits<std::int64_t>::min(), Pose2{}}));
+  EXPECT_TRUE(buffer.push({std::numeric_limits<std::int64_t>::max(), Pose2{}}));
+  EXPECT_EQ(buffer.size(), 1U);
+}
+
+TEST(TimedPoseBuffer, RejectsInterpolationAcrossFullInt64TimestampRange) {
+  TimedPoseBuffer buffer(std::numeric_limits<std::int64_t>::max(),
+                         std::numeric_limits<std::int64_t>::max());
+  EXPECT_TRUE(buffer.push({std::numeric_limits<std::int64_t>::min(), Pose2{}}));
+  EXPECT_TRUE(buffer.push({std::numeric_limits<std::int64_t>::max(), Pose2{}}));
+  EXPECT_FALSE(buffer.interpolate(0).has_value());
 }
 
 TEST(TimedPoseBuffer, RelativeReturnsTransformFromFirstTimeToSecond) {

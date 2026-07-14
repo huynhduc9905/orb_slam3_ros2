@@ -1,18 +1,38 @@
 #include "orb_lidar_mapper/timed_pose_buffer.hpp"
 
+#include <cstdint>
+#include <stdexcept>
+
 namespace orb_lidar_mapper {
+namespace {
+
+std::uint64_t orderedDuration(std::int64_t earlier_ns, std::int64_t later_ns) {
+  return static_cast<std::uint64_t>(later_ns) - static_cast<std::uint64_t>(earlier_ns);
+}
+
+}  // namespace
 
 TimedPoseBuffer::TimedPoseBuffer(std::int64_t retention_ns, std::int64_t max_gap_ns)
-: retention_ns_(retention_ns), max_gap_ns_(max_gap_ns) {}
+: retention_ns_(retention_ns), max_gap_ns_(max_gap_ns) {
+  if (retention_ns < 0 || max_gap_ns < 0) {
+    throw std::invalid_argument("TimedPoseBuffer durations must be non-negative");
+  }
+}
 
 bool TimedPoseBuffer::push(TimedPose2 sample) {
   if (!samples_.empty() && sample.stamp_ns < samples_.back().stamp_ns) {
     return false;
   }
 
+  if (!samples_.empty() && sample.stamp_ns == samples_.back().stamp_ns) {
+    samples_.back() = sample;
+    return true;
+  }
+
   samples_.push_back(sample);
-  const std::int64_t oldest_allowed = sample.stamp_ns - retention_ns_;
-  while (!samples_.empty() && samples_.front().stamp_ns < oldest_allowed) {
+  const auto retention_ns = static_cast<std::uint64_t>(retention_ns_);
+  while (!samples_.empty() &&
+         orderedDuration(samples_.front().stamp_ns, sample.stamp_ns) > retention_ns) {
     samples_.pop_front();
   }
   return true;
@@ -31,10 +51,11 @@ std::optional<Pose2> TimedPoseBuffer::interpolate(std::int64_t stamp_ns) const {
     }
     if (later.stamp_ns > stamp_ns) {
       const TimedPose2& earlier = samples_[index - 1];
-      const std::int64_t before_ns = stamp_ns - earlier.stamp_ns;
-      const std::int64_t after_ns = later.stamp_ns - stamp_ns;
-      const std::int64_t gap_ns = later.stamp_ns - earlier.stamp_ns;
-      if (before_ns > max_gap_ns_ || after_ns > max_gap_ns_ || gap_ns > max_gap_ns_) {
+      const auto before_ns = orderedDuration(earlier.stamp_ns, stamp_ns);
+      const auto after_ns = orderedDuration(stamp_ns, later.stamp_ns);
+      const auto gap_ns = orderedDuration(earlier.stamp_ns, later.stamp_ns);
+      const auto max_gap_ns = static_cast<std::uint64_t>(max_gap_ns_);
+      if (before_ns > max_gap_ns || after_ns > max_gap_ns || gap_ns > max_gap_ns) {
         return std::nullopt;
       }
       const double alpha = static_cast<double>(before_ns) / static_cast<double>(gap_ns);
