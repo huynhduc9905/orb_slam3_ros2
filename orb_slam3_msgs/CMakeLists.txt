@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GraphSnapshot.msg"
   "msg/RevisionedPath.msg"
   "msg/TrackingEvent.msg"
+  "msg/MapRevision.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )
 

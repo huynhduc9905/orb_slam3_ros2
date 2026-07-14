@@ -1,0 +1,12 @@
+std_msgs/Header header
+uint8 IDLE=0
+uint8 BUILDING=1
+uint8 PUBLISHED=2
+uint8 FAILED=3
+uint8 state
+uint64 graph_revision
+uint64 map_revision
+uint64 input_scan_count
+uint64 committed_scan_count
+float64 duration_ms
+string detail
