@@ -205,6 +205,22 @@ TEST_F(WrapperComponentTest, ValidCalibrationConfiguresBackendExactlyOnceAndCohe
   EXPECT_EQ(node->lastTrackedFrameForTest().graph_revision, 9u);
 }
 
+TEST_F(WrapperComponentTest, RepeatedIdenticalCameraInfoDoesNotReconfigureBackend) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame();
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+  sensor_msgs::msg::Image image; image.header.frame_id = "left_optical";
+  image.height = image.width = 2; image.encoding = "mono8"; image.step = 2;
+  image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+  setInfo(node);
+  node->processStereoForTest(image, image);
+  EXPECT_EQ(backend_ptr->configure_calls, 1);
+  EXPECT_EQ(backend_ptr->track_calls, 2);
+}
+
 TEST_F(WrapperComponentTest, BackendCalibrationRejectionBlocksTrackStereo) {
   auto backend = std::make_unique<FakeBackend>();
   backend->frame = okFrame(); backend->configure_ok = false;
@@ -230,7 +246,11 @@ TEST_F(WrapperComponentTest, CorrectedImageFramesPermitConfigurationRetry) {
   left.height = right.height = left.width = right.width = 2;
   left.encoding = right.encoding = "mono8"; left.step = right.step = 2; left.data = right.data = {0,0,0,0};
   node->processStereoForTest(left, right);
-  node->setCameraInfoForTest(info(), info(true));
+  auto corrected_left = info();
+  corrected_left.width = 847;
+  auto corrected_right = info(true);
+  corrected_right.width = 847;
+  node->setCameraInfoForTest(corrected_left, corrected_right);
   node->processStereoForTest(left, right);
   EXPECT_EQ(backend_ptr->configure_calls, 2);
   EXPECT_EQ(backend_ptr->track_calls, 1);

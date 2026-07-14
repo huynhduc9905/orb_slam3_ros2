@@ -42,6 +42,17 @@ Eigen::Isometry3d tfToEigen(const geometry_msgs::msg::Transform& tf) {
   return result;
 }
 
+bool cameraInfoCalibrationEqual(const sensor_msgs::msg::CameraInfo& lhs,
+                                const sensor_msgs::msg::CameraInfo& rhs) {
+  return lhs.width == rhs.width && lhs.height == rhs.height &&
+      lhs.distortion_model == rhs.distortion_model && lhs.d == rhs.d &&
+      lhs.k == rhs.k && lhs.r == rhs.r && lhs.p == rhs.p &&
+      lhs.binning_x == rhs.binning_x && lhs.binning_y == rhs.binning_y &&
+      lhs.roi.x_offset == rhs.roi.x_offset && lhs.roi.y_offset == rhs.roi.y_offset &&
+      lhs.roi.height == rhs.roi.height && lhs.roi.width == rhs.roi.width &&
+      lhs.roi.do_rectify == rhs.roi.do_rectify;
+}
+
 }  // namespace
 
 WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
@@ -114,7 +125,9 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
 WrapperNode::~WrapperNode() { if (image_worker_) image_worker_->stop(); }
 
 void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left) {
-  if (left) left_info_ = *msg; else right_info_ = *msg;
+  auto& cached = left ? left_info_ : right_info_;
+  if (cached && cameraInfoCalibrationEqual(*cached, *msg)) return;
+  cached = *msg;
   calibration_.reset();
   backend_configured_ = false;
   failed_calibration_.reset();
@@ -122,8 +135,12 @@ void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPt
 
 void WrapperNode::setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
                                        const sensor_msgs::msg::CameraInfo& right) {
+  const bool changed = !left_info_ || !right_info_ ||
+      !cameraInfoCalibrationEqual(*left_info_, left) ||
+      !cameraInfoCalibrationEqual(*right_info_, right);
   left_info_ = left;
   right_info_ = right;
+  if (!changed) return;
   calibration_.reset();
   backend_configured_ = false;
   failed_calibration_.reset();
