@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,6 +49,11 @@ struct MapRebuilderTestHooks {
   std::function<void()> worker_stopped;
 };
 
+struct MapRebuilderTestState {
+  std::size_t retry_exhausted_incrementals{};
+  std::size_t stale_incrementals{};
+};
+
 class MapRebuilder {
  public:
   using PublishCallback = std::function<void(std::shared_ptr<const MapSnapshot>, const RebuildStatus&)>;
@@ -63,6 +69,7 @@ class MapRebuilder {
   void requestRebuild(std::shared_ptr<const TrajectoryRevision> trajectory,
                       std::shared_ptr<const ScanArchive> scans);
   std::shared_ptr<const MapSnapshot> current() const;
+  MapRebuilderTestState testState() const;
 
  private:
   struct Impl;

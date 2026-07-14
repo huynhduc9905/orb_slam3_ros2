@@ -135,7 +135,7 @@ TEST(MapRebuilder, IncrementalAppendPublishesImmutableSnapshot) {
   EXPECT_EQ(first->map_revision, 1U);
   EXPECT_EQ(first->committed_scan_count, 1U);
   EXPECT_EQ(first->grid.cellAt(5, 0), 100);
-  EXPECT_TRUE(recorder.saw(RebuildState::kIdle, 7));
+  EXPECT_TRUE(recorder.waitForStatus(RebuildState::kIdle, 7));
   rebuilder.appendCommitted(scan(2, 2.0), pose(2), 7);
   ASSERT_TRUE(recorder.waitFor(4));
   EXPECT_EQ(first->committed_scan_count, 1U);
@@ -379,10 +379,10 @@ TEST(MapRebuilder, IncrementalHookExceptionRetriesAndPublishes) {
   rebuilder.appendCommitted(scan(1), pose(1), 1);
   ASSERT_TRUE(recorder.waitForPublishedRevision(1));
   EXPECT_EQ(attempts.load(), 2U);
-  EXPECT_TRUE(recorder.saw(RebuildState::kFailed, 0));
+  EXPECT_TRUE(recorder.saw(RebuildState::kFailed, 1));
   const auto statuses = recorder.copyStatuses();
   for (const RebuildStatus& status : statuses) {
-    if (status.state == RebuildState::kFailed && status.graph_revision == 0) {
+    if (status.state == RebuildState::kFailed && status.graph_revision == 1) {
       EXPECT_EQ(status.map_revision, 0U);
       EXPECT_EQ(status.committed_scan_count, 0U);
     }
@@ -405,6 +405,201 @@ TEST(MapRebuilder, PersistentIncrementalHookExceptionIsPreservedWithoutSpin) {
   rebuilder.requestRebuild(trajectory(2, {pose(1)}), archive({scan(1)}));
   ASSERT_TRUE(recorder.waitForPublishedRevision(2));
   EXPECT_EQ(rebuilder.current()->committed_scan_count, 1U);
+}
+
+TEST(MapRebuilder, IncrementalFailureIsSuppressedWhenNewerFullIsPending) {
+  Gate incremental_gate;
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2) {
+      incremental_gate.arrive();
+      incremental_gate.block();
+      throw std::runtime_error("injected");
+    }
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  ASSERT_TRUE(recorder.waitForStatus(RebuildState::kIdle, 1));
+  const std::size_t before_failure = recorder.copyStatuses().size();
+  rebuilder.appendCommitted(scan(2), pose(2), 1);
+  incremental_gate.wait();
+  rebuilder.requestRebuild(trajectory(2, {pose(1)}), archive({scan(1)}));
+  incremental_gate.release();
+
+  ASSERT_TRUE(recorder.waitForPublishedRevision(2));
+  ASSERT_TRUE(recorder.waitFor(before_failure + 3));
+  const auto statuses = recorder.copyStatuses();
+  const std::size_t building = recorder.statusIndex(RebuildState::kBuilding, 2);
+  const std::size_t published = recorder.statusIndex(RebuildState::kPublished, 2);
+  ASSERT_LT(building, statuses.size());
+  ASSERT_LT(published, statuses.size());
+  for (std::size_t i = before_failure; i < published; ++i) {
+    EXPECT_NE(statuses[i].state, RebuildState::kFailed);
+    EXPECT_NE(statuses[i].state, RebuildState::kIdle);
+  }
+}
+
+TEST(MapRebuilder, FullBuildFailureReportsCommittedSnapshotFields) {
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_rebuild_scan = [](std::uint64_t revision, std::uint64_t) {
+    if (revision == 2) throw std::runtime_error("injected");
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.requestRebuild(trajectory(2, {pose(2)}), archive({scan(2)}));
+  ASSERT_TRUE(recorder.waitForStatus(RebuildState::kFailed, 2));
+  std::lock_guard<std::mutex> lock(recorder.mutex);
+  bool saw_failure{};
+  for (std::size_t i = 0; i < recorder.statuses.size(); ++i) {
+    if (recorder.statuses[i].state == RebuildState::kFailed &&
+        recorder.statuses[i].detail == "rebuild failed") {
+      saw_failure = true;
+      ASSERT_NE(recorder.snapshots[i], nullptr);
+      EXPECT_EQ(recorder.statuses[i].map_revision, recorder.snapshots[i]->map_revision);
+      EXPECT_EQ(recorder.statuses[i].committed_scan_count,
+                recorder.snapshots[i]->committed_scan_count);
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+}
+
+TEST(MapRebuilder, ValidationFailureReportsCommittedSnapshotFields) {
+  Recorder recorder;
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.requestRebuild(trajectory(2, {pose(2), pose(2)}), archive({scan(2), scan(2)}));
+  ASSERT_TRUE(recorder.waitForStatus(RebuildState::kFailed, 2));
+  std::lock_guard<std::mutex> lock(recorder.mutex);
+  bool saw_failure{};
+  for (std::size_t i = 0; i < recorder.statuses.size(); ++i) {
+    if (recorder.statuses[i].state == RebuildState::kFailed &&
+        recorder.statuses[i].detail == "duplicate trajectory scan id") {
+      saw_failure = true;
+      ASSERT_NE(recorder.snapshots[i], nullptr);
+      EXPECT_EQ(recorder.statuses[i].map_revision, recorder.snapshots[i]->map_revision);
+      EXPECT_EQ(recorder.statuses[i].committed_scan_count,
+                recorder.snapshots[i]->committed_scan_count);
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+}
+
+TEST(MapRebuilder, IncrementalFailureReportsCommittedSnapshotFields) {
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_incremental_commit = [](std::uint64_t id) {
+    if (id == 2) throw std::runtime_error("injected");
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.appendCommitted(scan(2), pose(2), 1);
+  ASSERT_TRUE(recorder.waitFor(4));
+  std::lock_guard<std::mutex> lock(recorder.mutex);
+  bool saw_failure{};
+  for (std::size_t i = 0; i < recorder.statuses.size(); ++i) {
+    if (recorder.statuses[i].state == RebuildState::kFailed &&
+        recorder.statuses[i].detail == "incremental update failed") {
+      saw_failure = true;
+      ASSERT_NE(recorder.snapshots[i], nullptr);
+      EXPECT_EQ(recorder.statuses[i].map_revision, recorder.snapshots[i]->map_revision);
+      EXPECT_EQ(recorder.statuses[i].committed_scan_count,
+                recorder.snapshots[i]->committed_scan_count);
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+}
+
+TEST(MapRebuilder, StaleDiagnosticReportsCommittedSnapshotFields) {
+  Gate incremental_gate;
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2) {
+      incremental_gate.arrive();
+      incremental_gate.block();
+    }
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.appendCommitted(scan(2), pose(2), 2);
+  incremental_gate.wait();
+  rebuilder.requestRebuild(trajectory(3, {pose(1)}), archive({scan(1)}));
+  incremental_gate.release();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(3));
+  ASSERT_TRUE(recorder.waitForStatus(RebuildState::kFailed, 3));
+  std::lock_guard<std::mutex> lock(recorder.mutex);
+  bool saw_failure{};
+  for (std::size_t i = 0; i < recorder.statuses.size(); ++i) {
+    if (recorder.statuses[i].state == RebuildState::kFailed &&
+        recorder.statuses[i].detail == "incremental update stale after full rebuild") {
+      saw_failure = true;
+      ASSERT_NE(recorder.snapshots[i], nullptr);
+      EXPECT_EQ(recorder.statuses[i].map_revision, recorder.snapshots[i]->map_revision);
+      EXPECT_EQ(recorder.statuses[i].committed_scan_count,
+                recorder.snapshots[i]->committed_scan_count);
+    }
+  }
+  EXPECT_TRUE(saw_failure);
+}
+
+TEST(MapRebuilder, SuccessfulIncrementalCommitClearsReconciliationEntriesForItsScan) {
+  Recorder retry_recorder;
+  std::atomic<bool> fail{true};
+  MapRebuilderTestHooks retry_hooks;
+  retry_hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2 && fail.load()) throw std::runtime_error("injected");
+  };
+  MapRebuilder retry_rebuilder({}, [&](auto snapshot, const RebuildStatus& status) {
+    retry_recorder.record(snapshot, status);
+  }, retry_hooks);
+
+  retry_rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(retry_recorder.waitForPublishedRevision(1));
+  retry_rebuilder.appendCommitted(scan(2), pose(2), 1);
+  ASSERT_TRUE(retry_recorder.waitFor(4));
+  EXPECT_EQ(retry_rebuilder.testState().retry_exhausted_incrementals, 1U);
+  fail.store(false);
+  retry_rebuilder.appendCommitted(scan(2), pose(2), 1);
+  ASSERT_TRUE(retry_recorder.waitFor(7));
+  EXPECT_EQ(retry_rebuilder.testState().retry_exhausted_incrementals, 0U);
+
+  Gate stale_gate;
+  Recorder stale_recorder;
+  MapRebuilderTestHooks stale_hooks;
+  stale_hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2) {
+      stale_gate.arrive();
+      stale_gate.block();
+    }
+  };
+  MapRebuilder stale_rebuilder({}, [&](auto snapshot, const RebuildStatus& status) {
+    stale_recorder.record(snapshot, status);
+  }, stale_hooks);
+
+  stale_rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(stale_recorder.waitForPublishedRevision(1));
+  stale_rebuilder.appendCommitted(scan(2), pose(2), 2);
+  stale_gate.wait();
+  stale_rebuilder.requestRebuild(trajectory(3, {pose(1)}), archive({scan(1)}));
+  stale_gate.release();
+  ASSERT_TRUE(stale_recorder.waitForPublishedRevision(3));
+  ASSERT_TRUE(stale_recorder.waitForStatus(RebuildState::kFailed, 3));
+  EXPECT_EQ(stale_rebuilder.testState().stale_incrementals, 1U);
+  stale_rebuilder.appendCommitted(scan(2), pose(2), 3);
+  ASSERT_TRUE(stale_recorder.waitFor(8));
+  EXPECT_EQ(stale_rebuilder.testState().stale_incrementals, 0U);
 }
 
 TEST(MapRebuilder, FullCorrectionAtIncrementalRevisionPublishes) {

@@ -101,14 +101,15 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
     invoke(snapshot, status);
   }
 
-  void emitIncrementalFailure(std::string detail) {
+  void emitFailure(std::uint64_t graph_revision, std::uint64_t input_count,
+                   double duration_ms, std::string detail) {
     std::shared_ptr<const MapSnapshot> snapshot;
     RebuildStatus status;
     {
       std::lock_guard<std::mutex> lock(mutex);
       snapshot = current_snapshot;
-      status = {RebuildState::kFailed, committed_graph_revision, map_revision, 1,
-                committed_scan_count, 0.0, std::move(detail)};
+      status = {RebuildState::kFailed, graph_revision, map_revision, input_count,
+                committed_scan_count, duration_ms, std::move(detail)};
     }
     invoke(snapshot, status);
   }
@@ -211,8 +212,8 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         }
       }
       if (report_failure) {
-        emit(RebuildState::kFailed, request.trajectory->graph_revision, request.archive->scans.size(),
-             committed, elapsed, "rebuild failed");
+        emitFailure(request.trajectory->graph_revision, request.archive->scans.size(), elapsed,
+                    "rebuild failed");
         finishIdleIfQuiescent(request.generation, request.trajectory->graph_revision,
                               request.archive->scans.size(), committed, elapsed);
       }
@@ -234,7 +235,16 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         }
       }
       if (stale) {
-        emitIncrementalFailure("incremental update stale after full rebuild");
+        std::uint64_t generation{};
+        std::uint64_t graph_revision{};
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          generation = request_generation;
+          graph_revision = committed_graph_revision;
+          failures.push_back({graph_revision, 1, generation,
+                              "incremental update stale after full rebuild"});
+        }
+        cv.notify_one();
         return;
       }
       candidate_grid->insert(transformed(item.scan, item.pose));
@@ -262,6 +272,13 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
           ++committed_scan_count;
           committed_graph_revision = std::max(committed_graph_revision, item.graph_revision);
           applied_scan_ids.insert(item.scan.scan_id);
+          const auto erase_scan = [&item](auto& items) {
+            items.erase(std::remove_if(items.begin(), items.end(), [&item](const Incremental& candidate) {
+              return candidate.scan.scan_id == item.scan.scan_id;
+            }), items.end());
+          };
+          erase_scan(retry_exhausted_incrementals);
+          erase_scan(stale_incrementals);
           snapshot->graph_revision = committed_graph_revision;
           snapshot->map_revision = ++map_revision;
           snapshot->committed_scan_count = committed_scan_count;
@@ -272,7 +289,16 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         }
       }
       if (stale) {
-        emitIncrementalFailure("incremental update stale after full rebuild");
+        std::uint64_t generation{};
+        std::uint64_t graph_revision{};
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          generation = request_generation;
+          graph_revision = committed_graph_revision;
+          failures.push_back({graph_revision, 1, generation,
+                              "incremental update stale after full rebuild"});
+        }
+        cv.notify_one();
         return;
       }
       invoke(snapshot, published);
@@ -280,7 +306,9 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
                             published.committed_scan_count, 0.0);
     } catch (...) {
       std::uint64_t generation{};
+      const std::uint64_t graph_revision = item.graph_revision;
       bool retry{};
+      bool enqueue_failure{};
       {
         std::lock_guard<std::mutex> lock(mutex);
         generation = request_generation;
@@ -294,10 +322,13 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
             retry_exhausted_incrementals.push_back(std::move(item));
           }
         }
+        if (!stop) {
+          failures.push_back({graph_revision, 1, generation, "incremental update failed"});
+          enqueue_failure = true;
+        }
       }
-      emitIncrementalFailure("incremental update failed");
-      if (retry) cv.notify_one();
-      finishIdleIfQuiescent(generation, item.graph_revision, 1, 0, 0.0);
+      if (retry || enqueue_failure) cv.notify_one();
+      finishIdleIfQuiescent(generation, graph_revision, 1, 0, 0.0);
     }
   }
 
@@ -336,7 +367,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
           generation = request_generation;
         }
         if (eligible) {
-          emit(RebuildState::kFailed, failure->graph_revision, failure->input_count, 0, 0.0, failure->detail);
+          emitFailure(failure->graph_revision, failure->input_count, 0.0, failure->detail);
           finishIdleIfQuiescent(generation, failure->graph_revision, failure->input_count, 0, 0.0);
         } else {
           finishIdleIfQuiescent(generation, committed_graph_revision, 0, committed_scan_count, 0.0);
@@ -433,6 +464,13 @@ std::shared_ptr<const MapSnapshot> MapRebuilder::current() const {
   if (!state) return nullptr;
   std::lock_guard<std::mutex> lock(state->mutex);
   return state->current_snapshot;
+}
+
+MapRebuilderTestState MapRebuilder::testState() const {
+  const auto state = impl_;
+  if (!state) return {};
+  std::lock_guard<std::mutex> lock(state->mutex);
+  return {state->retry_exhausted_incrementals.size(), state->stale_incrementals.size()};
 }
 
 }  // namespace orb_lidar_mapper
