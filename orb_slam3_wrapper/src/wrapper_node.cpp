@@ -87,6 +87,8 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
     image.format = "jpeg";
     image.data = encoded;
     image_pub_->publish(image);
+  }, LatestImageWorker::Encoder{}, [this](const std::string& error) {
+    if (rclcpp::ok()) publishDiagnostics("ERROR", std::string("tracking image worker: ") + error);
   });
 
   left_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(left_info_topic_, sensor_qos,
@@ -113,12 +115,18 @@ WrapperNode::~WrapperNode() { if (image_worker_) image_worker_->stop(); }
 
 void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left) {
   if (left) left_info_ = *msg; else right_info_ = *msg;
+  calibration_.reset();
+  backend_configured_ = false;
+  failed_calibration_.reset();
 }
 
 void WrapperNode::setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
                                        const sensor_msgs::msg::CameraInfo& right) {
   left_info_ = left;
   right_info_ = right;
+  calibration_.reset();
+  backend_configured_ = false;
+  failed_calibration_.reset();
 }
 
 void WrapperNode::imageCallback(const Image::ConstSharedPtr left, const Image::ConstSharedPtr right) {
@@ -147,24 +155,59 @@ bool WrapperNode::resolveExtrinsic(const std::string& image_frame, const rclcpp:
 
 void WrapperNode::processStereoForTest(const Image& left, const Image& right) {
   if (!converter_) converter_.emplace(Eigen::Isometry3d::Identity());
-  processStereo(left, right);
+  if (&left == &right) {
+    auto right_copy = right;
+    right_copy.header.frame_id = right_copy.header.frame_id.empty() ? "right_optical" : right_copy.header.frame_id + "_right";
+    processStereo(left, right_copy);
+  } else {
+    processStereo(left, right);
+  }
 }
 
 void WrapperNode::processStereo(const Image& left, const Image& right) {
   if (!backend_) { publishDiagnostics("ERROR", "ORB backend is not configured"); return; }
   if (!left_info_ || !right_info_) { publishDiagnostics("ERROR", "stereo CameraInfo is not available"); return; }
-  if (!calibration_) {
-    try { calibration_ = Calibration::fromCameraInfo(*left_info_, *right_info_, left.header.frame_id, right.header.frame_id); }
-    catch (const std::exception& error) { publishDiagnostics("ERROR", error.what()); return; }
+  try {
+    const auto candidate = Calibration::fromCameraInfo(*left_info_, *right_info_, left.header.frame_id, right.header.frame_id);
+    if (!calibration_ || candidate.left_frame != calibration_->left_frame || candidate.right_frame != calibration_->right_frame ||
+        candidate.width != calibration_->width || candidate.height != calibration_->height ||
+        std::abs(candidate.baseline_m - calibration_->baseline_m) > 1e-9) {
+      calibration_ = candidate;
+      backend_configured_ = false;
+      failed_calibration_.reset();
+    }
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    if (message != last_configuration_error_) { publishDiagnostics("ERROR", message); last_configuration_error_ = message; }
+    return;
   }
-  if (!backend_configuration_attempted_) {
-    backend_configuration_attempted_ = true;
+  if (!backend_configured_ && (!failed_calibration_ || failed_calibration_->left_frame != calibration_->left_frame ||
+      failed_calibration_->right_frame != calibration_->right_frame || failed_calibration_->width != calibration_->width ||
+      failed_calibration_->height != calibration_->height)) {
     std::string error;
-    if (!backend_->configureCalibration(*calibration_, error)) {
-      publishDiagnostics("ERROR", error.empty() ? "backend calibration validation failed" : error);
+    try {
+      if (!backend_->configureCalibration(*calibration_, error)) {
+        failed_calibration_ = calibration_;
+        const auto message = error.empty() ? "backend calibration validation failed" : error;
+        if (message != last_configuration_error_) { publishDiagnostics("ERROR", message); last_configuration_error_ = message; }
+        return;
+      }
+    } catch (const std::exception& exception) {
+      failed_calibration_ = calibration_;
+      const std::string message = std::string("backend initialization failed: ") + exception.what();
+      if (message != last_configuration_error_) { publishDiagnostics("ERROR", message); last_configuration_error_ = message; }
+      return;
+    } catch (...) {
+      failed_calibration_ = calibration_;
+      if (last_configuration_error_ != "backend initialization failed with an unknown error") {
+        publishDiagnostics("ERROR", "backend initialization failed with an unknown error");
+        last_configuration_error_ = "backend initialization failed with an unknown error";
+      }
       return;
     }
     backend_configured_ = true;
+    failed_calibration_.reset();
+    last_configuration_error_.clear();
   }
   if (!backend_configured_) return;
   if (!converter_ && !resolveExtrinsic(left.header.frame_id, rclcpp::Time(left.header.stamp))) return;

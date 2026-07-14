@@ -38,6 +38,12 @@ TEST(Calibration, RejectsUnexpectedDimensions) {
                std::invalid_argument);
 }
 
+TEST(Calibration, RejectsEmptyOrAliasedImageFrames) {
+  auto left = makeInfo(); auto right = makeInfo(); right.p[3] = -21.429536819458008;
+  EXPECT_THROW(orb_slam3_wrapper::Calibration::fromCameraInfo(left, right, "", "right"), std::invalid_argument);
+  EXPECT_THROW(orb_slam3_wrapper::Calibration::fromCameraInfo(left, right, "same", "same"), std::invalid_argument);
+}
+
 TEST(Calibration, RejectsMalformedIntrinsicsAndBaseline) {
   auto left = makeInfo(); auto right = makeInfo();
   right.p[3] = -21.429536819458008; left.k[0] = std::numeric_limits<double>::quiet_NaN();

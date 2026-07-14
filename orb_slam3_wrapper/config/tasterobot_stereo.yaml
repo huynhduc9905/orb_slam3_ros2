@@ -18,6 +18,8 @@ Camera2.k1: 0.0
 Camera2.k2: 0.0
 Camera2.p1: 0.0
 Camera2.p2: 0.0
+Camera1.image_frame: "camera_infra1_optical_frame"
+Camera2.image_frame: "camera_infra2_optical_frame"
 Camera.width: 848
 Camera.height: 480
 Camera.fps: 30

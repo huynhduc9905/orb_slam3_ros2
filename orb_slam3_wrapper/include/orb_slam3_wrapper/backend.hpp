@@ -33,9 +33,9 @@ public:
   ORB_SLAM3::GraphSnapshot graphSnapshot() override;
 
 private:
+  std::string vocabulary_path_;
   std::unique_ptr<ORB_SLAM3::System> system_;
   bool shutdown_{false};
-  bool calibration_attempted_{false};
   std::string settings_path_;
 };
 

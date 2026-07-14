@@ -22,12 +22,13 @@ public:
   bool changed{false};
   int configure_calls{0};
   bool configure_ok{true};
+  int configure_failures{0};
   int track_calls{0};
 
   bool configureCalibration(const orb_slam3_wrapper::StereoCalibration&, std::string& error) override {
     ++configure_calls;
-    if (!configure_ok) error = "fake calibration rejected";
-    return configure_ok;
+    if (!configure_ok || configure_failures-- > 0) { error = "fake calibration rejected"; return false; }
+    return true;
   }
 
   ORB_SLAM3::FrameSnapshot trackStereo(
@@ -60,6 +61,7 @@ sensor_msgs::msg::CameraInfo info(bool right = false) {
   result.k[5] = result.p[6] = 238.95848083496094;
   result.k[8] = result.p[10] = 1.0;
   result.p[3] = right ? -21.429536819458008 : 0.0;
+  result.header.frame_id = right ? "wrong_camera_info_frame" : "wrong_camera_info_frame";
   return result;
 }
 
@@ -125,9 +127,9 @@ TEST_F(WrapperComponentTest, MapChangePublishesOneSnapshotAndConservativeEvent) 
 
   EXPECT_EQ(node->graphPublishCountForTest(), 1u);
   EXPECT_EQ(node->lastGraphSnapshotForTest().revision, 4u);
-  ASSERT_EQ(node->eventPublishCountForTest(), 2u);
+  ASSERT_EQ(node->eventPublishCountForTest(), 1u);
   EXPECT_EQ(node->lastTrackingEventForTest().type,
-            orb_slam3_msgs::msg::TrackingEvent::MAP_CREATED);
+            orb_slam3_msgs::msg::TrackingEvent::INITIALIZED);
 }
 
 TEST_F(WrapperComponentTest, GraphLoopEdgesAreCanonicalizedAndDeduplicated) {
@@ -215,6 +217,23 @@ TEST_F(WrapperComponentTest, BackendCalibrationRejectionBlocksTrackStereo) {
   node->processStereoForTest(image, image);
   EXPECT_EQ(backend_ptr->configure_calls, 1);
   EXPECT_EQ(backend_ptr->track_calls, 0);
+}
+
+TEST_F(WrapperComponentTest, CorrectedImageFramesPermitConfigurationRetry) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame(); backend->configure_failures = 1;
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+  sensor_msgs::msg::Image left; left.header.frame_id = "left_optical";
+  sensor_msgs::msg::Image right = left; right.header.frame_id = "right_optical";
+  left.height = right.height = left.width = right.width = 2;
+  left.encoding = right.encoding = "mono8"; left.step = right.step = 2; left.data = right.data = {0,0,0,0};
+  node->processStereoForTest(left, right);
+  node->setCameraInfoForTest(info(), info(true));
+  node->processStereoForTest(left, right);
+  EXPECT_EQ(backend_ptr->configure_calls, 2);
+  EXPECT_EQ(backend_ptr->track_calls, 1);
 }
 
 }  // namespace

@@ -1,11 +1,16 @@
 #include "orb_slam3_wrapper/latest_image_worker.hpp"
 
 #include <opencv2/imgcodecs.hpp>
+#include <exception>
+#include <string>
 
 namespace orb_slam3_wrapper {
 
-LatestImageWorker::LatestImageWorker(Callback callback)
-: callback_(std::move(callback)), thread_(&LatestImageWorker::run, this) {}
+LatestImageWorker::LatestImageWorker(Callback callback, Encoder encoder, ErrorCallback error_callback)
+: callback_(std::move(callback)),
+  encoder_(encoder ? std::move(encoder) : Encoder([](const cv::Mat& image, std::vector<unsigned char>& encoded) {
+    return cv::imencode(".jpg", image, encoded);
+  })), error_callback_(std::move(error_callback)), thread_(&LatestImageWorker::run, this) {}
 
 LatestImageWorker::~LatestImageWorker() { stop(); }
 
@@ -39,9 +44,15 @@ void LatestImageWorker::run() {
       image = std::move(latest_);
       header = latest_header_;
     }
-    std::vector<unsigned char> encoded;
-    cv::imencode(".jpg", image, encoded);
-    callback_(encoded, header);
+    try {
+      std::vector<unsigned char> encoded;
+      if (!encoder_(image, encoded)) throw std::runtime_error("JPEG encoding failed");
+      callback_(encoded, header);
+    } catch (const std::exception& error) {
+      try { if (error_callback_) error_callback_(error.what()); } catch (...) {}
+    } catch (...) {
+      try { if (error_callback_) error_callback_("unknown image worker failure"); } catch (...) {}
+    }
   }
 }
 

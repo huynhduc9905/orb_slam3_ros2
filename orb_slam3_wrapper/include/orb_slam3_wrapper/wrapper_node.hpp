@@ -73,7 +73,8 @@ private:
   std::optional<StereoCalibration> calibration_;
   std::optional<PoseConverter> converter_;
   bool backend_configured_{false};
-  bool backend_configuration_attempted_{false};
+  std::optional<StereoCalibration> failed_calibration_;
+  std::string last_configuration_error_;
   int last_tracking_state_{-1};
   std::uint64_t last_graph_revision_{0};
   rclcpp::Time last_tracking_image_time_{0, 0, RCL_ROS_TIME};

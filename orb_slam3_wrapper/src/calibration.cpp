@@ -77,6 +77,9 @@ StereoCalibration Calibration::fromCameraInfo(
   if (left_image_frame.empty() || right_image_frame.empty()) {
     throw std::invalid_argument("stereo image frame IDs must not be empty");
   }
+  if (left_image_frame == right_image_frame) {
+    throw std::invalid_argument("stereo image frame IDs must be distinct");
+  }
 
   requireRectifiedPinhole(left, "left", false);
   requireRectifiedPinhole(right, "right", true);

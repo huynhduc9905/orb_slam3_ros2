@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <functional>
+#include <string>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -15,7 +16,9 @@ class LatestImageWorker {
 public:
   using Callback = std::function<void(const std::vector<unsigned char>&,
                                      const std_msgs::msg::Header&)>;
-  explicit LatestImageWorker(Callback callback);
+  using Encoder = std::function<bool(const cv::Mat&, std::vector<unsigned char>&)>;
+  using ErrorCallback = std::function<void(const std::string&)>;
+  explicit LatestImageWorker(Callback callback, Encoder encoder = {}, ErrorCallback error_callback = {});
   ~LatestImageWorker();
   bool submit(const cv::Mat& image, const std_msgs::msg::Header& header);
   void stop();
@@ -23,6 +26,8 @@ public:
 private:
   void run();
   Callback callback_;
+  Encoder encoder_;
+  ErrorCallback error_callback_;
   std::mutex mutex_;
   std::condition_variable condition_;
   cv::Mat latest_;

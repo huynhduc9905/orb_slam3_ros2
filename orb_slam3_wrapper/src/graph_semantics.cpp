@@ -32,15 +32,14 @@ std::vector<std::uint8_t> classifyGraphDelta(
   bool new_loop = false;
   bool merged = false;
   bool created = false;
-  if (!previous) {
-    created = true;
-  } else {
+  if (previous) {
     const auto previous_edges = edges(*previous);
     for (const auto& edge : current_edges) {
       if (!previous_edges.count(edge)) { new_loop = true; break; }
     }
     merged = (!previous->active_map_connected && current.active_map_connected) ||
-             (current.active_map_connected && hasMultipleMapLineage(current));
+             (current.active_map_connected && hasMultipleMapLineage(current) &&
+              !hasMultipleMapLineage(*previous));
     created = current.active_map_id != previous->active_map_id && !current.active_map_connected;
   }
   if (new_loop) result.push_back(orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);

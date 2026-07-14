@@ -18,6 +18,10 @@ TEST(GraphSemantics, RevisionOnlyChangeHasNoSemanticEvent) {
   EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(previous, current).empty());
 }
 
+TEST(GraphSemantics, FirstSnapshotEstablishesBaselineWithoutEvents) {
+  EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(std::nullopt, graph(1, 17, false)).empty());
+}
+
 TEST(GraphSemantics, NewCanonicalLoopEdgeProducesLoopClosed) {
   auto previous = graph(1, 17, true);
   auto current = graph(2, 17, true);
@@ -45,4 +49,15 @@ TEST(GraphSemantics, DisconnectedNewMapProducesMapCreated) {
   const auto current = graph(2, 23, false);
   EXPECT_EQ(orb_slam3_wrapper::classifyGraphDelta(previous, current),
             (std::vector<std::uint8_t>{orb_slam3_msgs::msg::TrackingEvent::MAP_CREATED}));
+}
+
+TEST(GraphSemantics, MergeAndLoopEvidenceAreEmittedOnlyOnTheirDeltas) {
+  auto previous = graph(1, 17, false);
+  ORB_SLAM3::KeyframeSnapshot a; a.id = 10; a.map_id = 17;
+  ORB_SLAM3::KeyframeSnapshot b; b.id = 20; b.map_id = 23; b.loop_edge_ids = {10};
+  auto merged = graph(2, 23, true); merged.keyframes = {a, b};
+  const auto first = orb_slam3_wrapper::classifyGraphDelta(previous, merged);
+  EXPECT_EQ(first.size(), 2u);
+  EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(merged, graph(3, 23, true)).empty());
+  EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(merged, merged).empty());
 }
