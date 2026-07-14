@@ -55,15 +55,15 @@ bool TrajectoryStore::addWheel(TimedPose2 sample) {
       const WheelState& previous = wheel_states_[wheel_states_.size() - 2];
       state.cumulative_distance = previous.cumulative_distance +
         translationDistance(previous.pose, state.pose);
+    } else if (wheel_predecessor_) {
+      state.cumulative_distance = wheel_predecessor_->cumulative_distance +
+        translationDistance(wheel_predecessor_->pose, state.pose);
     }
   } else {
     const double cumulative_distance = wheel_states_.empty() ? 0.0 :
       wheel_states_.back().cumulative_distance +
       translationDistance(wheel_states_.back().pose, sample.pose);
     wheel_states_.push_back({sample.stamp_ns, sample.pose, cumulative_distance});
-    if (!wheel_origin_) {
-      wheel_origin_ = wheel_states_.back();
-    }
   }
   refreshWheelData();
   for (std::size_t interval_index = 0; interval_index < intervals_.size(); ++interval_index) {
@@ -124,8 +124,8 @@ std::optional<Pose2> TrajectoryStore::poseFromFrame(
 
 std::optional<double> TrajectoryStore::wheelCumulativeDistance(
   std::int64_t stamp_ns, const Pose2& pose) const {
-  if (wheel_origin_ && stamp_ns == wheel_origin_->stamp_ns) {
-    return wheel_origin_->cumulative_distance;
+  if (wheel_predecessor_ && stamp_ns == wheel_predecessor_->stamp_ns) {
+    return wheel_predecessor_->cumulative_distance;
   }
   if (wheel_states_.empty() || stamp_ns < wheel_states_.front().stamp_ns ||
       stamp_ns > wheel_states_.back().stamp_ns) {
@@ -284,6 +284,7 @@ void TrajectoryStore::pruneWheelStates() {
   const auto retention = static_cast<std::uint64_t>(config_.wheel_retention_ns);
   while (!wheel_states_.empty() &&
          orderedDuration(wheel_states_.front().stamp_ns, newest) > retention) {
+    wheel_predecessor_ = wheel_states_.front();
     wheel_states_.erase(wheel_states_.begin());
   }
 }
@@ -347,7 +348,7 @@ std::size_t TrajectoryStore::unresolvedScanCount() const {
 }
 
 std::size_t TrajectoryStore::wheelStateCount() const noexcept {
-  return wheel_states_.size() + (wheel_origin_ ? 1U : 0U);
+  return wheel_states_.size() + (wheel_predecessor_ ? 1U : 0U);
 }
 
 }  // namespace orb_lidar_mapper

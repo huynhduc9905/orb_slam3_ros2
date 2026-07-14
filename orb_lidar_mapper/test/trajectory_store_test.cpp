@@ -261,5 +261,47 @@ TEST(TrajectoryStore, DuplicateWheelTimestampReplacesSampleDeterministically) {
   EXPECT_TRUE(placement->pose.isApprox(Pose2{2, 0, 0}, 1e-12));
 }
 
+TEST(TrajectoryStore, ReplacesPrunedWheelEndpointForArchivedClosedInterval) {
+  TrajectoryStore store({0, 100});
+  ASSERT_TRUE(store.addWheel({0, Pose2{0, 0, 0}}));
+  store.addTrackedFrame(makeOkFrame(0, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame({0, TrackingState::kLost, false, 7, 1, Pose2{}, Pose2{}, Pose2{}});
+  ASSERT_TRUE(store.addWheel({50, Pose2{1, 0, 0}}));
+  ASSERT_TRUE(store.placeScan(50).has_value());
+  ASSERT_TRUE(store.addWheel({100, Pose2{2, 0, 0}}));
+  store.addTrackedFrame(makeOkFrame(100, Pose2{3, 0, 0}, 7, 2, Pose2{2, 0, 0}));
+  ASSERT_TRUE(store.snapshot()->scans[0].pose.isApprox(Pose2{1.5, 0, 0}, 1e-12));
+
+  ASSERT_TRUE(store.addWheel({100, Pose2{3, 0, 0}}));
+
+  const auto revision = store.snapshot();
+  ASSERT_EQ(revision->scans.size(), 1U);
+  EXPECT_TRUE(revision->scans[0].committed);
+  EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{4.0 / 3.0, 0, 0}, 1e-12));
+  EXPECT_EQ(store.wheelStateCount(), 2U);
+}
+
+TEST(TrajectoryStore, AdvancesPrunedWheelPredecessorAfterEachNewEndpoint) {
+  TrajectoryStore store({0, 100});
+  ASSERT_TRUE(store.addWheel({0, Pose2{}}));
+  ASSERT_TRUE(store.addWheel({50, Pose2{1, 0, 0}}));
+  ASSERT_TRUE(store.addWheel({100, Pose2{3, 0, 0}}));
+  store.addTrackedFrame(makeOkFrame(100, Pose2{3, 0, 0}, 7, 1, Pose2{3, 0, 0}));
+  store.addTrackedFrame({100, TrackingState::kLost, false, 7, 1,
+                         Pose2{}, Pose2{}, Pose2{}});
+  ASSERT_TRUE(store.addWheel({125, Pose2{3, 1, 0}}));
+  ASSERT_TRUE(store.placeScan(125).has_value());
+  ASSERT_TRUE(store.addWheel({150, Pose2{3, 2, 0}}));
+  store.addTrackedFrame(makeOkFrame(150, Pose2{7, 2, 0}, 7, 2, Pose2{3, 2, 0}));
+
+  ASSERT_TRUE(store.addWheel({150, Pose2{3, 4, 0}}));
+
+  const auto revision = store.snapshot();
+  ASSERT_EQ(revision->scans.size(), 1U);
+  EXPECT_TRUE(revision->scans[0].committed);
+  EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{4, 1, 0}, 1e-12));
+  EXPECT_EQ(store.wheelStateCount(), 2U);
+}
+
 }  // namespace
 }  // namespace orb_lidar_mapper

@@ -89,7 +89,7 @@ class TrajectoryStore {
 
   TimedPoseBuffer wheels_;
   TrajectoryConfig config_;
-  std::optional<WheelState> wheel_origin_;
+  std::optional<WheelState> wheel_predecessor_;
   std::vector<WheelState> wheel_states_;
   std::vector<FrameAnchor> frames_;
   std::vector<StoredScan> scans_;
