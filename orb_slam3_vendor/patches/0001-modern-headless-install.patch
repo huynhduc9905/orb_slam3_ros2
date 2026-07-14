@@ -1,0 +1,1237 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 016e743..e149fa9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,390 +1,105 @@
+-cmake_minimum_required(VERSION 2.8)
+-project(ORB_SLAM3)
++cmake_minimum_required(VERSION 3.16)
++project(ORB_SLAM3 LANGUAGES C CXX)
+ 
+-IF(NOT CMAKE_BUILD_TYPE)
+-  SET(CMAKE_BUILD_TYPE Release)
+-ENDIF()
++option(ORB_SLAM3_HEADLESS "Build without Pangolin viewer" ON)
++option(ORB_SLAM3_BUILD_EXAMPLES "Build upstream examples" OFF)
+ 
+-MESSAGE("Build type: " ${CMAKE_BUILD_TYPE})
++set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ 
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall   -O3")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
+-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
+-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+-
+-# Check C++11 or C++0x support
+-include(CheckCXXCompilerFlag)
+-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
+-CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+-if(COMPILER_SUPPORTS_CXX11)
+-   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+-   add_definitions(-DCOMPILEDWITHC11)
+-   message(STATUS "Using flag -std=c++11.")
+-elseif(COMPILER_SUPPORTS_CXX0X)
+-   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
+-   add_definitions(-DCOMPILEDWITHC0X)
+-   message(STATUS "Using flag -std=c++0x.")
+-else()
+-   message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+-endif()
+-
+-LIST(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules)
+-
+-find_package(OpenCV 4.4)
+-   if(NOT OpenCV_FOUND)
+-      message(FATAL_ERROR "OpenCV > 4.4 not found.")
+-   endif()
+-
+-MESSAGE("OPENCV VERSION:")
+-MESSAGE(${OpenCV_VERSION})
+-
+-find_package(Eigen3 3.1.0 REQUIRED)
+-find_package(Pangolin REQUIRED)
+-find_package(realsense2)
+-
+-include_directories(
+-${PROJECT_SOURCE_DIR}
+-${PROJECT_SOURCE_DIR}/include
+-${PROJECT_SOURCE_DIR}/include/CameraModels
+-${PROJECT_SOURCE_DIR}/Thirdparty/Sophus
+-${EIGEN3_INCLUDE_DIR}
+-${Pangolin_INCLUDE_DIRS}
+-)
+-
+-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
+-
+-add_library(${PROJECT_NAME} SHARED
+-src/System.cc
+-src/Tracking.cc
+-src/LocalMapping.cc
+-src/LoopClosing.cc
+-src/ORBextractor.cc
+-src/ORBmatcher.cc
+-src/FrameDrawer.cc
+-src/Converter.cc
+-src/MapPoint.cc
+-src/KeyFrame.cc
+-src/Atlas.cc
+-src/Map.cc
+-src/MapDrawer.cc
+-src/Optimizer.cc
+-src/Frame.cc
+-src/KeyFrameDatabase.cc
+-src/Sim3Solver.cc
+-src/Viewer.cc
+-src/ImuTypes.cc
+-src/G2oTypes.cc
+-src/CameraModels/Pinhole.cpp
+-src/CameraModels/KannalaBrandt8.cpp
+-src/OptimizableTypes.cpp
+-src/MLPnPsolver.cpp
+-src/GeometricTools.cc
+-src/TwoViewReconstruction.cc
+-src/Config.cc
+-src/Settings.cc
+-include/System.h
+-include/Tracking.h
+-include/LocalMapping.h
+-include/LoopClosing.h
+-include/ORBextractor.h
+-include/ORBmatcher.h
+-include/FrameDrawer.h
+-include/Converter.h
+-include/MapPoint.h
+-include/KeyFrame.h
+-include/Atlas.h
+-include/Map.h
+-include/MapDrawer.h
+-include/Optimizer.h
+-include/Frame.h
+-include/KeyFrameDatabase.h
+-include/Sim3Solver.h
+-include/Viewer.h
+-include/ImuTypes.h
+-include/G2oTypes.h
+-include/CameraModels/GeometricCamera.h
+-include/CameraModels/Pinhole.h
+-include/CameraModels/KannalaBrandt8.h
+-include/OptimizableTypes.h
+-include/MLPnPsolver.h
+-include/GeometricTools.h
+-include/TwoViewReconstruction.h
+-include/SerializationUtils.h
+-include/Config.h
+-include/Settings.h)
++find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc features2d calib3d)
++find_package(Eigen3 3.3 REQUIRED NO_MODULE)
++find_package(Boost REQUIRED COMPONENTS serialization)
++find_package(OpenSSL REQUIRED)
++find_package(realsense2 QUIET)
+ 
++add_subdirectory(Thirdparty/DBoW2)
+ add_subdirectory(Thirdparty/g2o)
+ 
+-target_link_libraries(${PROJECT_NAME}
+-${OpenCV_LIBS}
+-${EIGEN3_LIBS}
+-${Pangolin_LIBRARIES}
+-${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
+-${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
+--lboost_serialization
+--lcrypto
+-)
+-
+-# If RealSense SDK is found the library is added and its examples compiled
+-if(realsense2_FOUND)
+-    include_directories(${PROJECT_NAME}
+-    ${realsense_INCLUDE_DIR}
+-    )
+-    target_link_libraries(${PROJECT_NAME}
+-    ${realsense2_LIBRARY}
+-    )
+-endif()
+-
+-
+-# Build examples
+-
+-# RGB-D examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/RGB-D)
+-
+-add_executable(rgbd_tum
+-        Examples/RGB-D/rgbd_tum.cc)
+-target_link_libraries(rgbd_tum ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(rgbd_realsense_D435i
+-            Examples/RGB-D/rgbd_realsense_D435i.cc)
+-    target_link_libraries(rgbd_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-
+-# RGB-D inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/RGB-D-Inertial)
+-
+-if(realsense2_FOUND)
+-    add_executable(rgbd_inertial_realsense_D435i
+-            Examples/RGB-D-Inertial/rgbd_inertial_realsense_D435i.cc)
+-    target_link_libraries(rgbd_inertial_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-#Stereo examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo)
+-
+-add_executable(stereo_kitti
+-        Examples/Stereo/stereo_kitti.cc)
+-target_link_libraries(stereo_kitti ${PROJECT_NAME})
+-
+-add_executable(stereo_euroc
+-        Examples/Stereo/stereo_euroc.cc)
+-target_link_libraries(stereo_euroc ${PROJECT_NAME})
+-
+-add_executable(stereo_tum_vi
+-        Examples/Stereo/stereo_tum_vi.cc)
+-target_link_libraries(stereo_tum_vi ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(stereo_realsense_t265
+-            Examples/Stereo/stereo_realsense_t265.cc)
+-    target_link_libraries(stereo_realsense_t265 ${PROJECT_NAME})
+-
+-    add_executable(stereo_realsense_D435i
+-            Examples/Stereo/stereo_realsense_D435i.cc)
+-    target_link_libraries(stereo_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-#Monocular examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Monocular)
+-
+-add_executable(mono_tum
+-        Examples/Monocular/mono_tum.cc)
+-target_link_libraries(mono_tum ${PROJECT_NAME})
+-
+-add_executable(mono_kitti
+-        Examples/Monocular/mono_kitti.cc)
+-target_link_libraries(mono_kitti ${PROJECT_NAME})
+-
+-add_executable(mono_euroc
+-        Examples/Monocular/mono_euroc.cc)
+-target_link_libraries(mono_euroc ${PROJECT_NAME})
+-
+-add_executable(mono_tum_vi
+-        Examples/Monocular/mono_tum_vi.cc)
+-target_link_libraries(mono_tum_vi ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(mono_realsense_t265
+-            Examples/Monocular/mono_realsense_t265.cc)
+-    target_link_libraries(mono_realsense_t265 ${PROJECT_NAME})
+-
+-    add_executable(mono_realsense_D435i
+-            Examples/Monocular/mono_realsense_D435i.cc)
+-    target_link_libraries(mono_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-#Monocular inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Monocular-Inertial)
+-
+-add_executable(mono_inertial_euroc
+-        Examples/Monocular-Inertial/mono_inertial_euroc.cc)
+-target_link_libraries(mono_inertial_euroc ${PROJECT_NAME})
+-
+-add_executable(mono_inertial_tum_vi
+-        Examples/Monocular-Inertial/mono_inertial_tum_vi.cc)
+-target_link_libraries(mono_inertial_tum_vi ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(mono_inertial_realsense_t265
+-            Examples/Monocular-Inertial/mono_inertial_realsense_t265.cc)
+-    target_link_libraries(mono_inertial_realsense_t265 ${PROJECT_NAME})
+-
+-    add_executable(mono_inertial_realsense_D435i
+-            Examples/Monocular-Inertial/mono_inertial_realsense_D435i.cc)
+-    target_link_libraries(mono_inertial_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-#Stereo Inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo-Inertial)
+-
+-add_executable(stereo_inertial_euroc
+-        Examples/Stereo-Inertial/stereo_inertial_euroc.cc)
+-target_link_libraries(stereo_inertial_euroc ${PROJECT_NAME})
+-
+-add_executable(stereo_inertial_tum_vi
+-        Examples/Stereo-Inertial/stereo_inertial_tum_vi.cc)
+-target_link_libraries(stereo_inertial_tum_vi ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(stereo_inertial_realsense_t265
+-            Examples/Stereo-Inertial/stereo_inertial_realsense_t265.cc)
+-    target_link_libraries(stereo_inertial_realsense_t265 ${PROJECT_NAME})
+-
+-    add_executable(stereo_inertial_realsense_D435i
+-            Examples/Stereo-Inertial/stereo_inertial_realsense_D435i.cc)
+-    target_link_libraries(stereo_inertial_realsense_D435i ${PROJECT_NAME})
+-endif()
+-
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Calibration)
+-if(realsense2_FOUND)
+-    add_executable(recorder_realsense_D435i
+-            Examples/Calibration/recorder_realsense_D435i.cc)
+-    target_link_libraries(recorder_realsense_D435i ${PROJECT_NAME})
+-
+-    add_executable(recorder_realsense_T265
+-            Examples/Calibration/recorder_realsense_T265.cc)
+-    target_link_libraries(recorder_realsense_T265 ${PROJECT_NAME})
+-endif()
+-
+-#Old examples
+-
+-# RGB-D examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/RGB-D)
+-
+-add_executable(rgbd_tum_old
+-        Examples_old/RGB-D/rgbd_tum.cc)
+-target_link_libraries(rgbd_tum_old ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(rgbd_realsense_D435i_old
+-            Examples_old/RGB-D/rgbd_realsense_D435i.cc)
+-    target_link_libraries(rgbd_realsense_D435i_old ${PROJECT_NAME})
+-endif()
+-
+-
+-# RGB-D inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/RGB-D-Inertial)
+-
+-if(realsense2_FOUND)
+-    add_executable(rgbd_inertial_realsense_D435i_old
+-            Examples_old/RGB-D-Inertial/rgbd_inertial_realsense_D435i.cc)
+-    target_link_libraries(rgbd_inertial_realsense_D435i_old ${PROJECT_NAME})
+-endif()
+-
+-#Stereo examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/Stereo)
+-
+-add_executable(stereo_kitti_old
+-        Examples_old/Stereo/stereo_kitti.cc)
+-target_link_libraries(stereo_kitti_old ${PROJECT_NAME})
+-
+-add_executable(stereo_euroc_old
+-        Examples_old/Stereo/stereo_euroc.cc)
+-target_link_libraries(stereo_euroc_old ${PROJECT_NAME})
+-
+-add_executable(stereo_tum_vi_old
+-        Examples_old/Stereo/stereo_tum_vi.cc)
+-target_link_libraries(stereo_tum_vi_old ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(stereo_realsense_t265_old
+-            Examples_old/Stereo/stereo_realsense_t265.cc)
+-    target_link_libraries(stereo_realsense_t265_old ${PROJECT_NAME})
+-
+-    add_executable(stereo_realsense_D435i_old
+-            Examples_old/Stereo/stereo_realsense_D435i.cc)
+-    target_link_libraries(stereo_realsense_D435i_old ${PROJECT_NAME})
++set(ORB_SLAM3_SOURCES
++  src/System.cc
++  src/Tracking.cc
++  src/LocalMapping.cc
++  src/LoopClosing.cc
++  src/ORBextractor.cc
++  src/ORBmatcher.cc
++  src/FrameDrawer.cc
++  src/Converter.cc
++  src/MapPoint.cc
++  src/KeyFrame.cc
++  src/Atlas.cc
++  src/Map.cc
++  src/Optimizer.cc
++  src/Frame.cc
++  src/KeyFrameDatabase.cc
++  src/Sim3Solver.cc
++  src/ImuTypes.cc
++  src/G2oTypes.cc
++  src/CameraModels/Pinhole.cpp
++  src/CameraModels/KannalaBrandt8.cpp
++  src/OptimizableTypes.cpp
++  src/MLPnPsolver.cpp
++  src/GeometricTools.cc
++  src/TwoViewReconstruction.cc
++  src/Config.cc
++  src/Settings.cc)
++
++if(ORB_SLAM3_HEADLESS)
++  list(APPEND ORB_SLAM3_SOURCES src/HeadlessMapDrawer.cc)
++else()
++  find_package(Pangolin REQUIRED)
++  list(APPEND ORB_SLAM3_SOURCES src/MapDrawer.cc src/Viewer.cc)
+ endif()
+ 
+-#Monocular examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/Monocular)
+-
+-add_executable(mono_tum_old
+-        Examples_old/Monocular/mono_tum.cc)
+-target_link_libraries(mono_tum_old ${PROJECT_NAME})
+-
+-add_executable(mono_kitti_old
+-        Examples_old/Monocular/mono_kitti.cc)
+-target_link_libraries(mono_kitti_old ${PROJECT_NAME})
+-
+-add_executable(mono_euroc_old
+-        Examples_old/Monocular/mono_euroc.cc)
+-target_link_libraries(mono_euroc_old ${PROJECT_NAME})
+-
+-add_executable(mono_tum_vi_old
+-        Examples_old/Monocular/mono_tum_vi.cc)
+-target_link_libraries(mono_tum_vi_old ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(mono_realsense_t265_old
+-            Examples_old/Monocular/mono_realsense_t265.cc)
+-    target_link_libraries(mono_realsense_t265_old ${PROJECT_NAME})
+-
+-    add_executable(mono_realsense_D435i_old
+-            Examples_old/Monocular/mono_realsense_D435i.cc)
+-    target_link_libraries(mono_realsense_D435i_old ${PROJECT_NAME})
++add_library(ORB_SLAM3 SHARED ${ORB_SLAM3_SOURCES})
++add_library(ORB_SLAM3::ORB_SLAM3 ALIAS ORB_SLAM3)
++target_compile_definitions(ORB_SLAM3 PRIVATE $<$<BOOL:${ORB_SLAM3_HEADLESS}>:ORB_SLAM3_HEADLESS>)
++target_include_directories(ORB_SLAM3
++  PUBLIC
++    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
++    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
++    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/CameraModels>
++    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Thirdparty/Sophus>
++    $<BUILD_INTERFACE:${OpenCV_INCLUDE_DIRS}>
++    $<INSTALL_INTERFACE:include/orb_slam3>
++    $<INSTALL_INTERFACE:include/orb_slam3/CameraModels>
++    $<INSTALL_INTERFACE:include/orb_slam3/Thirdparty/Sophus>
++  PRIVATE
++    ${PROJECT_SOURCE_DIR})
++target_link_libraries(ORB_SLAM3
++  PUBLIC Eigen3::Eigen DBoW2 g2o Boost::serialization ${OpenCV_LIBS}
++  PRIVATE OpenSSL::Crypto)
++
++if(NOT ORB_SLAM3_HEADLESS)
++  target_include_directories(ORB_SLAM3 PRIVATE ${Pangolin_INCLUDE_DIRS})
++  target_link_libraries(ORB_SLAM3 PRIVATE ${Pangolin_LIBRARIES})
+ endif()
+ 
+-#Monocular inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/Monocular-Inertial)
+-
+-add_executable(mono_inertial_euroc_old
+-        Examples_old/Monocular-Inertial/mono_inertial_euroc.cc)
+-target_link_libraries(mono_inertial_euroc_old ${PROJECT_NAME})
+-
+-add_executable(mono_inertial_tum_vi_old
+-        Examples_old/Monocular-Inertial/mono_inertial_tum_vi.cc)
+-target_link_libraries(mono_inertial_tum_vi_old ${PROJECT_NAME})
+-
+ if(realsense2_FOUND)
+-    add_executable(mono_inertial_realsense_t265_old
+-            Examples_old/Monocular-Inertial/mono_inertial_realsense_t265.cc)
+-    target_link_libraries(mono_inertial_realsense_t265_old ${PROJECT_NAME})
+-
+-    add_executable(mono_inertial_realsense_D435i_old
+-            Examples_old/Monocular-Inertial/mono_inertial_realsense_D435i.cc)
+-    target_link_libraries(mono_inertial_realsense_D435i_old ${PROJECT_NAME})
++  target_link_libraries(ORB_SLAM3 PRIVATE ${realsense2_LIBRARY})
+ endif()
+ 
+-#Stereo Inertial examples
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples_old/Stereo-Inertial)
+-
+-add_executable(stereo_inertial_euroc_old
+-        Examples_old/Stereo-Inertial/stereo_inertial_euroc.cc)
+-target_link_libraries(stereo_inertial_euroc_old ${PROJECT_NAME})
+-
+-add_executable(stereo_inertial_tum_vi_old
+-        Examples_old/Stereo-Inertial/stereo_inertial_tum_vi.cc)
+-target_link_libraries(stereo_inertial_tum_vi_old ${PROJECT_NAME})
+-
+-if(realsense2_FOUND)
+-    add_executable(stereo_inertial_realsense_t265_old
+-            Examples_old/Stereo-Inertial/stereo_inertial_realsense_t265.cc)
+-    target_link_libraries(stereo_inertial_realsense_t265_old ${PROJECT_NAME})
+-
+-    add_executable(stereo_inertial_realsense_D435i_old
+-            Examples_old/Stereo-Inertial/stereo_inertial_realsense_D435i.cc)
+-    target_link_libraries(stereo_inertial_realsense_D435i_old ${PROJECT_NAME})
++set_target_properties(ORB_SLAM3 DBoW2 g2o PROPERTIES INSTALL_RPATH "$ORIGIN")
++
++install(TARGETS ORB_SLAM3 DBoW2 g2o EXPORT ORB_SLAM3Targets
++  LIBRARY DESTINATION lib
++  ARCHIVE DESTINATION lib
++  RUNTIME DESTINATION bin)
++install(DIRECTORY include/ DESTINATION include/orb_slam3
++  FILES_MATCHING PATTERN "*.h")
++install(DIRECTORY Thirdparty/Sophus/sophus/ DESTINATION include/orb_slam3/Thirdparty/Sophus/sophus
++  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
++install(DIRECTORY Thirdparty/DBoW2/DBoW2/
++  DESTINATION include/orb_slam3/Thirdparty/DBoW2/DBoW2
++  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
++install(DIRECTORY Thirdparty/DBoW2/DUtils/
++  DESTINATION include/orb_slam3/Thirdparty/DBoW2/DUtils
++  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
++install(DIRECTORY Thirdparty/g2o/g2o/ DESTINATION include/orb_slam3/Thirdparty/g2o/g2o
++  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
++install(FILES Thirdparty/g2o/config.h DESTINATION include/orb_slam3/Thirdparty/g2o)
++
++if(ORB_SLAM3_BUILD_EXAMPLES)
++  add_subdirectory(Examples)
+ endif()
+diff --git a/Examples_old/ROS/ORB_SLAM3/CMakeLists.txt b/Examples_old/ROS/ORB_SLAM3/CMakeLists.txt
+index 12792fe..aa3b0d7 100644
+--- a/Examples_old/ROS/ORB_SLAM3/CMakeLists.txt
++++ b/Examples_old/ROS/ORB_SLAM3/CMakeLists.txt
+@@ -9,8 +9,8 @@ ENDIF()
+ 
+ MESSAGE("Build type: " ${ROS_BUILD_TYPE})
+ 
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3 -march=native ")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3 -march=native")
++set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3")
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3")
+ 
+ # Check C++11 or C++0x support
+ include(CheckCXXCompilerFlag)
+diff --git a/Thirdparty/DBoW2/CMakeLists.txt b/Thirdparty/DBoW2/CMakeLists.txt
+index c312b25..d89775d 100644
+--- a/Thirdparty/DBoW2/CMakeLists.txt
++++ b/Thirdparty/DBoW2/CMakeLists.txt
+@@ -1,45 +1,15 @@
+-cmake_minimum_required(VERSION 2.8)
+-project(DBoW2)
+-
+-if(NOT CMAKE_BUILD_TYPE)
+-  set(CMAKE_BUILD_TYPE Release)
+-endif()
+-
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3 -march=native ")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3 -march=native")
++cmake_minimum_required(VERSION 3.16)
++project(DBoW2 LANGUAGES CXX)
+ 
+ set(HDRS_DBOW2
+-  DBoW2/BowVector.h
+-  DBoW2/FORB.h 
+-  DBoW2/FClass.h       
+-  DBoW2/FeatureVector.h
+-  DBoW2/ScoringObject.h   
+-  DBoW2/TemplatedVocabulary.h)
++  DBoW2/BowVector.h DBoW2/FORB.h DBoW2/FClass.h DBoW2/FeatureVector.h
++  DBoW2/ScoringObject.h DBoW2/TemplatedVocabulary.h)
+ set(SRCS_DBOW2
+-  DBoW2/BowVector.cpp
+-  DBoW2/FORB.cpp      
+-  DBoW2/FeatureVector.cpp
++  DBoW2/BowVector.cpp DBoW2/FORB.cpp DBoW2/FeatureVector.cpp
+   DBoW2/ScoringObject.cpp)
++set(HDRS_DUTILS DUtils/Random.h DUtils/Timestamp.h)
++set(SRCS_DUTILS DUtils/Random.cpp DUtils/Timestamp.cpp)
+ 
+-set(HDRS_DUTILS
+-  DUtils/Random.h
+-  DUtils/Timestamp.h)
+-set(SRCS_DUTILS
+-  DUtils/Random.cpp
+-  DUtils/Timestamp.cpp)
+-
+-
+-find_package(OpenCV 4 QUIET)
+-if(NOT OpenCV_FOUND)
+-   find_package(OpenCV 3.0 QUIET)
+-   if(NOT OpenCV_FOUND)
+-      message(FATAL_ERROR "OpenCV > 3.0 not found.")
+-   endif()
+-endif()
+-
+-set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
+-
+-include_directories(${OpenCV_INCLUDE_DIRS})
+ add_library(DBoW2 SHARED ${SRCS_DBOW2} ${SRCS_DUTILS})
+-target_link_libraries(DBoW2 ${OpenCV_LIBS})
+-
++target_include_directories(DBoW2 PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
++target_link_libraries(DBoW2 PUBLIC ${OpenCV_LIBS})
+diff --git a/Thirdparty/g2o/CMakeLists.txt b/Thirdparty/g2o/CMakeLists.txt
+index 1a32ff9..854ddb6 100644
+--- a/Thirdparty/g2o/CMakeLists.txt
++++ b/Thirdparty/g2o/CMakeLists.txt
+@@ -1,178 +1,44 @@
+-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+-SET(CMAKE_LEGACY_CYGWIN_WIN32 0)
+-
+-PROJECT(g2o)
+-
+-SET(g2o_C_FLAGS)
+-SET(g2o_CXX_FLAGS)
+-
+-# default built type
+-if(NOT CMAKE_BUILD_TYPE)
+-  set(CMAKE_BUILD_TYPE Release)
+-endif()
+-
+-MESSAGE(STATUS "BUILD TYPE:" ${CMAKE_BUILD_TYPE})
+-
+-SET (G2O_LIB_TYPE SHARED)
+-
+-# There seems to be an issue with MSVC8
+-# see http://eigen.tuxfamily.org/bz/show_bug.cgi?id=83
+-if(MSVC90)
+-  add_definitions(-DEIGEN_DONT_ALIGN_STATICALLY=1)
+-  message(STATUS "Disabling memory alignment for MSVC8")
+-endif(MSVC90)
+-
+-# Set the output directory for the build executables and libraries
+-IF(WIN32)
+-  SET(g2o_LIBRARY_OUTPUT_DIRECTORY ${g2o_SOURCE_DIR}/bin CACHE PATH "Target for the libraries")
+-ELSE(WIN32)
+-  SET(g2o_LIBRARY_OUTPUT_DIRECTORY ${g2o_SOURCE_DIR}/lib CACHE PATH "Target for the libraries")
+-ENDIF(WIN32)
+-SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${g2o_LIBRARY_OUTPUT_DIRECTORY})
+-SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${g2o_LIBRARY_OUTPUT_DIRECTORY})
+-SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${g2o_RUNTIME_OUTPUT_DIRECTORY})
+-
+-# Set search directory for looking for our custom CMake scripts to
+-# look for SuiteSparse, QGLViewer, and Eigen3.
+-LIST(APPEND CMAKE_MODULE_PATH ${g2o_SOURCE_DIR}/cmake_modules)
+-
+-# Detect OS and define macros appropriately
+-IF(UNIX)
+-  ADD_DEFINITIONS(-DUNIX)
+-  MESSAGE(STATUS "Compiling on Unix")
+-ENDIF(UNIX)
+-
+-# Eigen library parallelise itself, though, presumably due to performance issues
+-# OPENMP is experimental. We experienced some slowdown with it
+-FIND_PACKAGE(OpenMP)
+-SET(G2O_USE_OPENMP OFF CACHE BOOL "Build g2o with OpenMP support (EXPERIMENTAL)")
+-IF(OPENMP_FOUND AND G2O_USE_OPENMP)
+-  SET (G2O_OPENMP 1)
+-  SET(g2o_C_FLAGS "${g2o_C_FLAGS} ${OpenMP_C_FLAGS}")
+-  SET(g2o_CXX_FLAGS "${g2o_CXX_FLAGS} -DEIGEN_DONT_PARALLELIZE ${OpenMP_CXX_FLAGS}")
+-  MESSAGE(STATUS "Compiling with OpenMP support")
+-ENDIF(OPENMP_FOUND AND G2O_USE_OPENMP)
+-
+-# Compiler specific options for gcc
+-SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
+-SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
+-# SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+-# SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
+-
+-# activate warnings !!!
+-SET(g2o_C_FLAGS "${g2o_C_FLAGS} -Wall -W")
+-SET(g2o_CXX_FLAGS "${g2o_CXX_FLAGS} -Wall -W")
+-
+-# specifying compiler flags
+-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${g2o_CXX_FLAGS}")
+-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${g2o_C_FLAGS}")
+-
+-# Find Eigen3
+-SET(EIGEN3_INCLUDE_DIR ${G2O_EIGEN3_INCLUDE})
+-FIND_PACKAGE(Eigen3 3.1.0 REQUIRED)
+-IF(EIGEN3_FOUND)
+-  SET(G2O_EIGEN3_INCLUDE ${EIGEN3_INCLUDE_DIR} CACHE PATH "Directory of Eigen3")
+-ELSE(EIGEN3_FOUND)
+-  SET(G2O_EIGEN3_INCLUDE "" CACHE PATH "Directory of Eigen3")
+-ENDIF(EIGEN3_FOUND)
+-
+-# Generate config.h
+-SET(G2O_CXX_COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER}")
+-configure_file(config.h.in ${g2o_SOURCE_DIR}/config.h)
+-
+-# Set up the top-level include directories
+-INCLUDE_DIRECTORIES(
+-${g2o_SOURCE_DIR}/core
+-${g2o_SOURCE_DIR}/types
+-${g2o_SOURCE_DIR}/stuff 
+-${G2O_EIGEN3_INCLUDE})
+-
+-# Include the subdirectories
+-ADD_LIBRARY(g2o ${G2O_LIB_TYPE}
+-#types
+-g2o/types/types_sba.h
+-g2o/types/types_six_dof_expmap.h
+-g2o/types/types_sba.cpp
+-g2o/types/types_six_dof_expmap.cpp
+-g2o/types/types_seven_dof_expmap.cpp
+-g2o/types/types_seven_dof_expmap.h
+-g2o/types/se3quat.h
+-g2o/types/se3_ops.h
+-g2o/types/se3_ops.hpp
+-#core
+-g2o/core/base_edge.h
+-g2o/core/base_binary_edge.h
+-g2o/core/hyper_graph_action.cpp
+-g2o/core/base_binary_edge.hpp
+-g2o/core/hyper_graph_action.h
+-g2o/core/base_multi_edge.h           
+-g2o/core/hyper_graph.cpp
+-g2o/core/base_multi_edge.hpp         
+-g2o/core/hyper_graph.h
+-g2o/core/base_unary_edge.h          
+-g2o/core/linear_solver.h
+-g2o/core/base_unary_edge.hpp         
+-g2o/core/marginal_covariance_cholesky.cpp
+-g2o/core/base_vertex.h               
+-g2o/core/marginal_covariance_cholesky.h
+-g2o/core/base_vertex.hpp             
+-g2o/core/matrix_structure.cpp
+-g2o/core/batch_stats.cpp             
+-g2o/core/matrix_structure.h
+-g2o/core/batch_stats.h               
+-g2o/core/openmp_mutex.h
+-g2o/core/block_solver.h              
+-g2o/core/block_solver.hpp            
+-g2o/core/parameter.cpp               
+-g2o/core/parameter.h                 
+-g2o/core/cache.cpp                   
+-g2o/core/cache.h
+-g2o/core/optimizable_graph.cpp       
+-g2o/core/optimizable_graph.h         
+-g2o/core/solver.cpp                  
+-g2o/core/solver.h
+-g2o/core/creators.h                 
+-g2o/core/optimization_algorithm_factory.cpp
+-g2o/core/estimate_propagator.cpp     
+-g2o/core/optimization_algorithm_factory.h
+-g2o/core/estimate_propagator.h       
+-g2o/core/factory.cpp                 
+-g2o/core/optimization_algorithm_property.h
+-g2o/core/factory.h                   
+-g2o/core/sparse_block_matrix.h
+-g2o/core/sparse_optimizer.cpp  
+-g2o/core/sparse_block_matrix.hpp
+-g2o/core/sparse_optimizer.h
+-g2o/core/hyper_dijkstra.cpp 
+-g2o/core/hyper_dijkstra.h
+-g2o/core/parameter_container.cpp     
+-g2o/core/parameter_container.h
+-g2o/core/optimization_algorithm.cpp 
+-g2o/core/optimization_algorithm.h
+-g2o/core/optimization_algorithm_with_hessian.cpp 
+-g2o/core/optimization_algorithm_with_hessian.h
+-g2o/core/optimization_algorithm_levenberg.cpp 
+-g2o/core/optimization_algorithm_levenberg.h
+-g2o/core/optimization_algorithm_gauss_newton.cpp 
+-g2o/core/optimization_algorithm_gauss_newton.h
+-g2o/core/jacobian_workspace.cpp 
+-g2o/core/jacobian_workspace.h
+-g2o/core/robust_kernel.cpp 
+-g2o/core/robust_kernel.h
+-g2o/core/robust_kernel_factory.cpp
+-g2o/core/robust_kernel_factory.h
+-g2o/core/robust_kernel_impl.cpp 
+-g2o/core/robust_kernel_impl.h
+-#stuff
+-g2o/stuff/string_tools.h
+-g2o/stuff/color_macros.h 
+-g2o/stuff/macros.h
+-g2o/stuff/timeutil.cpp
+-g2o/stuff/misc.h
+-g2o/stuff/timeutil.h
+-g2o/stuff/os_specific.c    
+-g2o/stuff/os_specific.h
+-g2o/stuff/string_tools.cpp
+-g2o/stuff/property.cpp       
+-g2o/stuff/property.h       
+-)
++cmake_minimum_required(VERSION 3.16)
++project(g2o LANGUAGES C CXX)
++
++configure_file(config.h.in ${CMAKE_CURRENT_SOURCE_DIR}/config.h)
++
++add_library(g2o SHARED
++  g2o/types/types_sba.h g2o/types/types_six_dof_expmap.h
++  g2o/types/types_sba.cpp g2o/types/types_six_dof_expmap.cpp
++  g2o/types/types_seven_dof_expmap.cpp g2o/types/types_seven_dof_expmap.h
++  g2o/types/se3quat.h g2o/types/se3_ops.h g2o/types/se3_ops.hpp
++  g2o/core/base_edge.h g2o/core/base_binary_edge.h g2o/core/hyper_graph_action.cpp
++  g2o/core/base_binary_edge.hpp g2o/core/hyper_graph_action.h g2o/core/base_multi_edge.h
++  g2o/core/hyper_graph.cpp g2o/core/base_multi_edge.hpp g2o/core/hyper_graph.h
++  g2o/core/base_unary_edge.h g2o/core/linear_solver.h g2o/core/base_unary_edge.hpp
++  g2o/core/marginal_covariance_cholesky.cpp g2o/core/base_vertex.h
++  g2o/core/marginal_covariance_cholesky.h g2o/core/base_vertex.hpp
++  g2o/core/matrix_structure.cpp g2o/core/batch_stats.cpp g2o/core/matrix_structure.h
++  g2o/core/openmp_mutex.h g2o/core/block_solver.h g2o/core/block_solver.hpp
++  g2o/core/parameter.cpp g2o/core/base_vertex.h g2o/core/cache.cpp g2o/core/cache.h
++  g2o/core/optimizable_graph.cpp g2o/core/optimizable_graph.h g2o/core/solver.cpp
++  g2o/core/solver.h g2o/core/creators.h g2o/core/optimization_algorithm_factory.cpp
++  g2o/core/estimate_propagator.cpp g2o/core/optimization_algorithm_factory.h
++  g2o/core/estimate_propagator.h g2o/core/factory.cpp
++  g2o/core/optimization_algorithm_property.h g2o/core/factory.h
++  g2o/core/sparse_block_matrix.h g2o/core/sparse_optimizer.cpp
++  g2o/core/sparse_block_matrix.hpp g2o/core/sparse_optimizer.h g2o/core/hyper_dijkstra.cpp
++  g2o/core/parameter_container.cpp g2o/core/parameter_container.h
++  g2o/core/optimization_algorithm.cpp g2o/core/optimization_algorithm.h
++  g2o/core/optimization_algorithm_with_hessian.cpp
++  g2o/core/optimization_algorithm_with_hessian.h
++  g2o/core/optimization_algorithm_levenberg.cpp
++  g2o/core/optimization_algorithm_levenberg.h
++  g2o/core/optimization_algorithm_gauss_newton.cpp
++  g2o/core/optimization_algorithm_gauss_newton.h g2o/core/jacobian_workspace.cpp
++  g2o/core/jacobian_workspace.h g2o/core/robust_kernel.cpp g2o/core/robust_kernel.h
++  g2o/core/robust_kernel_factory.cpp g2o/core/robust_kernel_impl.cpp
++  g2o/core/robust_kernel_impl.h g2o/stuff/string_tools.h g2o/stuff/color_macros.h
++  g2o/stuff/macros.h g2o/stuff/timeutil.cpp g2o/stuff/misc.h g2o/stuff/timeutil.h
++  g2o/stuff/os_specific.c g2o/stuff/os_specific.h g2o/stuff/string_tools.cpp
++  g2o/stuff/property.cpp g2o/stuff/property.h)
++target_include_directories(g2o
++  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
++  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++target_link_libraries(g2o PUBLIC Eigen3::Eigen)
+diff --git a/include/HeadlessMapDrawer.h b/include/HeadlessMapDrawer.h
+new file mode 100644
+index 0000000..9dc428d
+--- /dev/null
++++ b/include/HeadlessMapDrawer.h
+@@ -0,0 +1,19 @@
++/**
++* This file is part of ORB-SLAM3.
++*/
++
++#ifndef HEADLESSMAPDRAWER_H
++#define HEADLESSMAPDRAWER_H
++
++#include "PoseDrawer.h"
++
++namespace ORB_SLAM3 {
++class HeadlessMapDrawer final : public PoseDrawer {
++public:
++  void SetCurrentCameraPose(const Sophus::SE3f& Tcw) override;
++private:
++  Sophus::SE3f mCameraPose;
++};
++}
++
++#endif
+diff --git a/include/LoopClosing.h b/include/LoopClosing.h
+index c9ccb26..7b6bfe0 100644
+--- a/include/LoopClosing.h
++++ b/include/LoopClosing.h
+@@ -223,7 +223,7 @@ protected:
+     bool mbFixScale;
+ 
+ 
+-    bool mnFullBAIdx;
++    int mnFullBAIdx;
+ 
+ 
+ 
+diff --git a/include/Map.h b/include/Map.h
+index 0e0a49c..d9d22a7 100644
+--- a/include/Map.h
++++ b/include/Map.h
+@@ -24,7 +24,6 @@
+ #include "KeyFrame.h"
+ 
+ #include <set>
+-#include <pangolin/pangolin.h>
+ #include <mutex>
+ 
+ #include <boost/serialization/base_object.hpp>
+@@ -187,9 +186,6 @@ protected:
+     int mnBigChangeIdx;
+ 
+ 
+-    // View of the map in aerial sight (for the AtlasViewer)
+-    GLubyte* mThumbnail;
+-
+     bool mIsInUse;
+     bool mHasTumbnail;
+     bool mbBad = false;
+diff --git a/include/MapDrawer.h b/include/MapDrawer.h
+index 635fb21..f4573e2 100644
+--- a/include/MapDrawer.h
++++ b/include/MapDrawer.h
+@@ -20,6 +20,7 @@
+ #ifndef MAPDRAWER_H
+ #define MAPDRAWER_H
+ 
++#include"PoseDrawer.h"
+ #include"Atlas.h"
+ #include"MapPoint.h"
+ #include"KeyFrame.h"
+@@ -33,7 +34,7 @@ namespace ORB_SLAM3
+ 
+ class Settings;
+ 
+-class MapDrawer
++class MapDrawer : public PoseDrawer
+ {
+ public:
+     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+@@ -46,7 +47,7 @@ public:
+     void DrawMapPoints();
+     void DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const bool bDrawInertialGraph, const bool bDrawOptLba);
+     void DrawCurrentCamera(pangolin::OpenGlMatrix &Twc);
+-    void SetCurrentCameraPose(const Sophus::SE3f &Tcw);
++    void SetCurrentCameraPose(const Sophus::SE3f &Tcw) override;
+     void SetReferenceKeyFrame(KeyFrame *pKF);
+     void GetCurrentOpenGLCameraMatrix(pangolin::OpenGlMatrix &M, pangolin::OpenGlMatrix &MOw);
+ 
+diff --git a/include/PoseDrawer.h b/include/PoseDrawer.h
+new file mode 100644
+index 0000000..8434526
+--- /dev/null
++++ b/include/PoseDrawer.h
+@@ -0,0 +1,18 @@
++/**
++* This file is part of ORB-SLAM3.
++*/
++
++#ifndef POSEDRAWER_H
++#define POSEDRAWER_H
++
++#include <sophus/se3.hpp>
++
++namespace ORB_SLAM3 {
++class PoseDrawer {
++public:
++  virtual ~PoseDrawer() = default;
++  virtual void SetCurrentCameraPose(const Sophus::SE3f& Tcw) = 0;
++};
++}
++
++#endif
+diff --git a/include/System.h b/include/System.h
+index 872c86e..697efe9 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -30,13 +30,12 @@
+ 
+ #include "Tracking.h"
+ #include "FrameDrawer.h"
+-#include "MapDrawer.h"
++#include "PoseDrawer.h"
+ #include "Atlas.h"
+ #include "LocalMapping.h"
+ #include "LoopClosing.h"
+ #include "KeyFrameDatabase.h"
+ #include "ORBVocabulary.h"
+-#include "Viewer.h"
+ #include "ImuTypes.h"
+ #include "Settings.h"
+ 
+@@ -74,6 +73,7 @@ public:
+ class Viewer;
+ class FrameDrawer;
+ class MapDrawer;
++class HeadlessMapDrawer;
+ class Atlas;
+ class Tracking;
+ class LocalMapping;
+@@ -225,16 +225,20 @@ private:
+     LoopClosing* mpLoopCloser;
+ 
+     // The viewer draws the map and the current camera pose. It uses Pangolin.
++#ifndef ORB_SLAM3_HEADLESS
+     Viewer* mpViewer;
++#endif
+ 
+     FrameDrawer* mpFrameDrawer;
+-    MapDrawer* mpMapDrawer;
++    PoseDrawer* mpMapDrawer;
+ 
+     // System threads: Local Mapping, Loop Closing, Viewer.
+     // The Tracking thread "lives" in the main execution thread that creates the System object.
+     std::thread* mptLocalMapping;
+     std::thread* mptLoopClosing;
++#ifndef ORB_SLAM3_HEADLESS
+     std::thread* mptViewer;
++#endif
+ 
+     // Reset flag
+     std::mutex mMutexReset;
+diff --git a/include/Tracking.h b/include/Tracking.h
+index 863c98e..69e0295 100644
+--- a/include/Tracking.h
++++ b/include/Tracking.h
+@@ -23,7 +23,6 @@
+ #include <opencv2/core/core.hpp>
+ #include <opencv2/features2d/features2d.hpp>
+ 
+-#include "Viewer.h"
+ #include "FrameDrawer.h"
+ #include "Atlas.h"
+ #include "LocalMapping.h"
+@@ -32,7 +31,7 @@
+ #include "ORBVocabulary.h"
+ #include "KeyFrameDatabase.h"
+ #include "ORBextractor.h"
+-#include "MapDrawer.h"
++#include "PoseDrawer.h"
+ #include "System.h"
+ #include "ImuTypes.h"
+ #include "Settings.h"
+@@ -45,7 +44,9 @@
+ namespace ORB_SLAM3
+ {
+ 
++#ifndef ORB_SLAM3_HEADLESS
+ class Viewer;
++#endif
+ class FrameDrawer;
+ class Atlas;
+ class LocalMapping;
+@@ -58,7 +59,7 @@ class Tracking
+ 
+ public:
+     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+-    Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Atlas* pAtlas,
++    Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, PoseDrawer* pMapDrawer, Atlas* pAtlas,
+              KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq=std::string());
+ 
+     ~Tracking();
+@@ -77,7 +78,9 @@ public:
+ 
+     void SetLocalMapper(LocalMapping* pLocalMapper);
+     void SetLoopClosing(LoopClosing* pLoopClosing);
++#ifndef ORB_SLAM3_HEADLESS
+     void SetViewer(Viewer* pViewer);
++#endif
+     void SetStepByStep(bool bSet);
+     bool GetStepByStep();
+ 
+@@ -278,9 +281,11 @@ protected:
+     System* mpSystem;
+     
+     //Drawers
++#ifndef ORB_SLAM3_HEADLESS
+     Viewer* mpViewer;
++#endif
+     FrameDrawer* mpFrameDrawer;
+-    MapDrawer* mpMapDrawer;
++    PoseDrawer* mpMapDrawer;
+     bool bStepByStep;
+ 
+     //Atlas
+diff --git a/src/Atlas.cc b/src/Atlas.cc
+index 7bdea06..6cb35c4 100644
+--- a/src/Atlas.cc
++++ b/src/Atlas.cc
+@@ -17,7 +17,6 @@
+ */
+ 
+ #include "Atlas.h"
+-#include "Viewer.h"
+ 
+ #include "GeometricCamera.h"
+ #include "Pinhole.h"
+diff --git a/src/HeadlessMapDrawer.cc b/src/HeadlessMapDrawer.cc
+new file mode 100644
+index 0000000..64eb0e8
+--- /dev/null
++++ b/src/HeadlessMapDrawer.cc
+@@ -0,0 +1,12 @@
++/**
++* This file is part of ORB-SLAM3.
++*/
++
++#include "HeadlessMapDrawer.h"
++
++namespace ORB_SLAM3 {
++void HeadlessMapDrawer::SetCurrentCameraPose(const Sophus::SE3f& Tcw)
++{
++  mCameraPose = Tcw;
++}
++}
+diff --git a/src/Map.cc b/src/Map.cc
+index f1f8cd0..b72651f 100644
+--- a/src/Map.cc
++++ b/src/Map.cc
+@@ -30,7 +30,6 @@ Map::Map():mnMaxKFid(0),mnBigChangeIdx(0), mbImuInitialized(false), mnMapChange(
+ mbFail(false), mIsInUse(false), mHasTumbnail(false), mbBad(false), mnMapChangeNotified(0), mbIsInertial(false), mbIMU_BA1(false), mbIMU_BA2(false)
+ {
+     mnId=nNextId++;
+-    mThumbnail = static_cast<GLubyte*>(NULL);
+ }
+ 
+ Map::Map(int initKFid):mnInitKFid(initKFid), mnMaxKFid(initKFid),/*mnLastLoopKFid(initKFid),*/ mnBigChangeIdx(0), mIsInUse(false),
+@@ -38,7 +37,6 @@ Map::Map(int initKFid):mnInitKFid(initKFid), mnMaxKFid(initKFid),/*mnLastLoopKFi
+                        mnMapChange(0), mbFail(false), mnMapChangeNotified(0), mbIsInertial(false), mbIMU_BA1(false), mbIMU_BA2(false)
+ {
+     mnId=nNextId++;
+-    mThumbnail = static_cast<GLubyte*>(NULL);
+ }
+ 
+ Map::~Map()
+@@ -49,10 +47,6 @@ Map::~Map()
+     //TODO: erase all keyframes from memory
+     mspKeyFrames.clear();
+ 
+-    if(mThumbnail)
+-        delete mThumbnail;
+-    mThumbnail = static_cast<GLubyte*>(NULL);
+-
+     mvpReferenceMapPoints.clear();
+     mvpKeyFrameOrigins.clear();
+ }
+diff --git a/src/System.cc b/src/System.cc
+index 60d9c51..2d96ec7 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -21,7 +21,13 @@
+ #include "System.h"
+ #include "Converter.h"
+ #include <thread>
+-#include <pangolin/pangolin.h>
++#ifndef ORB_SLAM3_HEADLESS
++#include "MapDrawer.h"
++#include "Viewer.h"
++#endif
++#ifdef ORB_SLAM3_HEADLESS
++#include "HeadlessMapDrawer.h"
++#endif
+ #include <iomanip>
+ #include <openssl/md5.h>
+ #include <boost/serialization/base_object.hpp>
+@@ -40,7 +46,7 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+ 
+ System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
+                const bool bUseViewer, const int initFr, const string &strSequence):
+-    mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
++    mSensor(sensor), mbReset(false), mbResetActiveMap(false),
+     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
+ {
+     // Output welcome message
+@@ -181,9 +187,13 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR || mSensor==IMU_RGBD)
+         mpAtlas->SetInertialSensor();
+ 
+-    //Create Drawers. These are used by the Viewer
++    // Create drawers. FrameDrawer is retained for feature-overlay images.
+     mpFrameDrawer = new FrameDrawer(mpAtlas);
++#ifdef ORB_SLAM3_HEADLESS
++    mpMapDrawer = new HeadlessMapDrawer();
++#else
+     mpMapDrawer = new MapDrawer(mpAtlas, strSettingsFile, settings_);
++#endif
+ 
+     //Initialize the Tracking thread
+     //(it will live in the main thread of execution, the one that called this constructor)
+@@ -225,16 +235,20 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
+ 
+     //usleep(10*1000*1000);
+ 
+-    //Initialize the Viewer thread and launch
++    // Initialize the Viewer thread and launch.
++#ifndef ORB_SLAM3_HEADLESS
+     if(bUseViewer)
+     //if(false) // TODO
+     {
+-        mpViewer = new Viewer(this, mpFrameDrawer,mpMapDrawer,mpTracker,strSettingsFile,settings_);
++        mpViewer = new Viewer(this, mpFrameDrawer, static_cast<MapDrawer*>(mpMapDrawer), mpTracker, strSettingsFile, settings_);
+         mptViewer = new thread(&Viewer::Run, mpViewer);
+         mpTracker->SetViewer(mpViewer);
+         mpLoopCloser->mpViewer = mpViewer;
+         mpViewer->both = mpFrameDrawer->both;
+     }
++#else
++    (void)bUseViewer;
++#endif
+ 
+     // Fix verbosity
+     Verbose::SetTh(Verbose::VERBOSITY_QUIET);
+@@ -1546,4 +1560,3 @@ string System::CalculateCheckSum(string filename, int type)
+ }
+ 
+ } //namespace ORB_SLAM
+-
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 5191451..3340d07 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -18,6 +18,9 @@
+ 
+ 
+ #include "Tracking.h"
++#ifndef ORB_SLAM3_HEADLESS
++#include "Viewer.h"
++#endif
+ 
+ #include "ORBmatcher.h"
+ #include "FrameDrawer.h"
+@@ -41,10 +44,10 @@ namespace ORB_SLAM3
+ {
+ 
+ 
+-Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
++Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, PoseDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
+     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
+     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+-    mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
++    mbReadyToInitializate(false), mpSystem(pSys), bStepByStep(false),
+     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+ {
+@@ -1434,10 +1437,12 @@ void Tracking::SetLoopClosing(LoopClosing *pLoopClosing)
+     mpLoopClosing=pLoopClosing;
+ }
+ 
++#ifndef ORB_SLAM3_HEADLESS
+ void Tracking::SetViewer(Viewer *pViewer)
+ {
+     mpViewer=pViewer;
+ }
++#endif
+ 
+ void Tracking::SetStepByStep(bool bSet)
+ {
+@@ -3780,12 +3785,14 @@ void Tracking::Reset(bool bLocMap)
+ {
+     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
+ 
++#ifndef ORB_SLAM3_HEADLESS
+     if(mpViewer)
+     {
+         mpViewer->RequestStop();
+         while(!mpViewer->isStopped())
+             usleep(3000);
+     }
++#endif
+ 
+     // Reset Local Mapping
+     if (!bLocMap)
+@@ -3831,8 +3838,10 @@ void Tracking::Reset(bool bLocMap)
+     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+     mvIniMatches.clear();
+ 
++#ifndef ORB_SLAM3_HEADLESS
+     if(mpViewer)
+         mpViewer->Release();
++#endif
+ 
+     Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+ }
+@@ -3840,12 +3849,14 @@ void Tracking::Reset(bool bLocMap)
+ void Tracking::ResetActiveMap(bool bLocMap)
+ {
+     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
++#ifndef ORB_SLAM3_HEADLESS
+     if(mpViewer)
+     {
+         mpViewer->RequestStop();
+         while(!mpViewer->isStopped())
+             usleep(3000);
+     }
++#endif
+ 
+     Map* pMap = mpAtlas->GetCurrentMap();
+ 
+@@ -3922,8 +3933,10 @@ void Tracking::ResetActiveMap(bool bLocMap)
+ 
+     mbVelocity = false;
+ 
++#ifndef ORB_SLAM3_HEADLESS
+     if(mpViewer)
+         mpViewer->Release();
++#endif
+ 
+     Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+ }

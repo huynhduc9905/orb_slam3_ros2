@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 project(orb_slam3_vendor)
 
 find_package(ament_cmake REQUIRED)
+find_package(Boost REQUIRED COMPONENTS serialization)
+find_package(Eigen3 REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 set(UPSTREAM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ORB_SLAM3")
 set(PATCHED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/ORB_SLAM3")
@@ -34,4 +38,5 @@ install(EXPORT ORB_SLAM3Targets
   NAMESPACE ORB_SLAM3::)
 
 ament_export_targets(ORB_SLAM3Targets HAS_LIBRARY_TARGET)
+ament_export_dependencies(Boost Eigen3 OpenCV OpenSSL)
 ament_package(CONFIG_EXTRAS "cmake/orb_slam3_vendor-extras.cmake.in")
