@@ -23,6 +23,8 @@ struct GridSnapshot {
   double resolution_m{};
   double origin_x{};
   double origin_y{};
+  std::int64_t origin_cell_x{};
+  std::int64_t origin_cell_y{};
   std::uint32_t width{};
   std::uint32_t height{};
   std::vector<std::int8_t> cells;
@@ -30,6 +32,7 @@ struct GridSnapshot {
   std::int8_t cellAt(std::int64_t cell_x, std::int64_t cell_y) const;
   bool operator==(const GridSnapshot& rhs) const {
     return resolution_m == rhs.resolution_m && origin_x == rhs.origin_x && origin_y == rhs.origin_y &&
+           origin_cell_x == rhs.origin_cell_x && origin_cell_y == rhs.origin_cell_y &&
            width == rhs.width && height == rhs.height && cells == rhs.cells;
   }
 };

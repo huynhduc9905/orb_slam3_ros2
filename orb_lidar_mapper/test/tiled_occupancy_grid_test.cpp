@@ -62,6 +62,34 @@ TEST(TiledOccupancyGrid, ProducesTaskFourCompatibleDenseSnapshotMetadataAndCells
   EXPECT_EQ(snapshot.cellAt(-64, 127), -1);
 }
 
+TEST(GridSnapshot, RejectsMalformedMetadataAndInconsistentCellStorage) {
+  GridSnapshot snapshot;
+  snapshot.resolution_m = 1.0;
+  snapshot.origin_x = 0.0;
+  snapshot.origin_y = 0.0;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.cells = {0, 0, 0, 0};
+  EXPECT_EQ(snapshot.cellAt(1, 1), 0);
+
+  snapshot.resolution_m = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(snapshot.cellAt(0, 0), -1);
+  snapshot.resolution_m = 0.0;
+  EXPECT_EQ(snapshot.cellAt(0, 0), -1);
+  snapshot.resolution_m = 1.0;
+  snapshot.origin_x = std::numeric_limits<double>::infinity();
+  EXPECT_EQ(snapshot.cellAt(0, 0), -1);
+  snapshot.origin_x = 0.0;
+  snapshot.cells.pop_back();
+  EXPECT_EQ(snapshot.cellAt(1, 1), -1);
+
+  snapshot.cells.clear();
+  snapshot.width = std::numeric_limits<std::uint32_t>::max();
+  snapshot.height = std::numeric_limits<std::uint32_t>::max();
+  EXPECT_EQ(snapshot.cellAt(std::numeric_limits<std::int64_t>::max(),
+                            std::numeric_limits<std::int64_t>::max()), -1);
+}
+
 TEST(TiledOccupancyGrid, InfinityClearsWithoutOccupiedEndpointAndInvalidRangesAreSkipped) {
   GridConfig config;
   config.resolution_m = 1.0;
@@ -106,6 +134,18 @@ TEST(TiledOccupancyGrid, UsesSignedFloorCellsAndNegativeTileKeys) {
   EXPECT_EQ(snapshot.cellAt(-66, -1), 100);
 }
 
+TEST(TiledOccupancyGrid, LooksUpDistantNegativeTilesUsingExactOriginCells) {
+  GridConfig config;
+  config.resolution_m = 0.01;
+  TiledOccupancyGrid grid(config);
+  const double point = std::nextafter(-63'999'996.8, 0.0);
+  grid.insert({{{point, 0.0}, {point, 0.0}, true},
+               {{point, 0.0}, {point, 0.0}, true}});
+
+  const GridSnapshot snapshot = grid.snapshot();
+  EXPECT_EQ(snapshot.cellAt(-6'399'999'680, 0), 100);
+}
+
 TEST(TiledOccupancyGrid, SaturatesLogOddsAndKeepsAmbiguousObservedCellsUnknown) {
   GridConfig config;
   config.resolution_m = 1.0;
@@ -148,6 +188,24 @@ TEST(TiledOccupancyGrid, SerializesDenseBoundsAndCellsIndependentOfInsertionOrde
   EXPECT_EQ(first.snapshot(), second.snapshot());
 }
 
+TEST(TiledOccupancyGrid, ProducesIdenticalSnapshotsForRepeatedOrderedOverlappingEvidence) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  const std::vector<Ray2> evidence = {
+      {{0.0, 0.0}, {1.0, 0.0}, true},
+      {{65.0, 0.0}, {66.0, 0.0}, true},
+      {{0.0, 0.0}, {1.0, 0.0}, true},
+      {{65.0, 0.0}, {66.0, 0.0}, true},
+      {{0.0, 0.0}, {1.0, 0.0}, true},
+  };
+  TiledOccupancyGrid first(config);
+  TiledOccupancyGrid second(config);
+  first.insert(evidence);
+  for (const Ray2& ray : evidence) second.insert({ray});
+
+  EXPECT_EQ(first.snapshot(), second.snapshot());
+}
+
 TEST(TiledOccupancyGrid, SkipsExtremeFiniteRaysWithoutThrowing) {
   TiledOccupancyGrid grid;
   EXPECT_NO_THROW(grid.insert({{{1.0e300, 1.0e300}, {1.0e300, 1.0e300}, true},
@@ -183,6 +241,24 @@ TEST(TiledOccupancyGrid, RejectsInvalidConfigurations) {
   invalid(config);
   config = {};
   config.occupied_threshold = config.max_log_odds + 1.0F;
+  invalid(config);
+  config = {};
+  config.min_log_odds = 0.1F;
+  invalid(config);
+  config = {};
+  config.max_log_odds = -0.1F;
+  invalid(config);
+  config = {};
+  config.free_threshold = 0.1F;
+  invalid(config);
+  config = {};
+  config.occupied_threshold = -0.1F;
+  invalid(config);
+  config = {};
+  config.miss_log_odds = config.min_log_odds - 0.1F;
+  invalid(config);
+  config = {};
+  config.hit_log_odds = config.max_log_odds + 0.1F;
   invalid(config);
 }
 

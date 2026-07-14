@@ -47,10 +47,12 @@ bool validConfig(const GridConfig& config) {
          config.usable_range_m > 0.0 && finite(config.hit_log_odds) && finite(config.miss_log_odds) &&
          finite(config.min_log_odds) && finite(config.max_log_odds) &&
          finite(config.free_threshold) && finite(config.occupied_threshold) &&
-         config.min_log_odds <= config.max_log_odds && config.miss_log_odds < 0.0F &&
-         config.hit_log_odds > 0.0F && config.free_threshold < config.occupied_threshold &&
-         config.free_threshold >= config.min_log_odds &&
-         config.occupied_threshold <= config.max_log_odds;
+         config.min_log_odds <= 0.0F && 0.0F <= config.max_log_odds &&
+         config.min_log_odds <= config.miss_log_odds && config.miss_log_odds < 0.0F &&
+         0.0F < config.hit_log_odds && config.hit_log_odds <= config.max_log_odds &&
+         config.min_log_odds <= config.free_threshold && config.free_threshold <= 0.0F &&
+         0.0F <= config.occupied_threshold && config.occupied_threshold <= config.max_log_odds &&
+         config.free_threshold < config.occupied_threshold;
 }
 
 }  // namespace
@@ -64,12 +66,18 @@ struct TiledOccupancyGrid::Tile {
 TiledOccupancyGrid::~TiledOccupancyGrid() = default;
 
 std::int8_t GridSnapshot::cellAt(std::int64_t cell_x, std::int64_t cell_y) const {
-  if (resolution_m <= 0.0 || width == 0 || height == 0) return -1;
-  const long double x = static_cast<long double>(cell_x) -
-                        std::floor(static_cast<long double>(origin_x) / resolution_m);
-  const long double y = static_cast<long double>(cell_y) -
-                        std::floor(static_cast<long double>(origin_y) / resolution_m);
-  if (x < 0 || y < 0 || x >= width || y >= height) return -1;
+  if (!std::isfinite(resolution_m) || resolution_m <= 0.0 || !std::isfinite(origin_x) ||
+      !std::isfinite(origin_y) || width == 0 || height == 0 ||
+      static_cast<std::size_t>(width) > std::numeric_limits<std::size_t>::max() / height) {
+    return -1;
+  }
+  const std::size_t expected_cells = static_cast<std::size_t>(width) * height;
+  if (cells.size() != expected_cells || cell_x < origin_cell_x || cell_y < origin_cell_y) return -1;
+  const std::uint64_t x = static_cast<std::uint64_t>(cell_x) -
+                          static_cast<std::uint64_t>(origin_cell_x);
+  const std::uint64_t y = static_cast<std::uint64_t>(cell_y) -
+                          static_cast<std::uint64_t>(origin_cell_y);
+  if (x >= width || y >= height) return -1;
   return cells[static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)];
 }
 
@@ -162,6 +170,8 @@ GridSnapshot TiledOccupancyGrid::snapshot() const {
       width > std::numeric_limits<std::size_t>::max() / height) return result;
   result.origin_x = static_cast<double>((*min_x)->x * kTileSize) * config_.resolution_m;
   result.origin_y = static_cast<double>((*min_y)->y * kTileSize) * config_.resolution_m;
+  result.origin_cell_x = (*min_x)->x * kTileSize;
+  result.origin_cell_y = (*min_y)->y * kTileSize;
   result.width = static_cast<std::uint32_t>(width);
   result.height = static_cast<std::uint32_t>(height);
   result.cells.assign(static_cast<std::size_t>(width * height), -1);
