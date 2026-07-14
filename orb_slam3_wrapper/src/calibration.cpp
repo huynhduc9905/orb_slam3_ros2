@@ -20,6 +20,50 @@ void requireClose(double left, double right, const char* name) {
   }
 }
 
+void requireRectifiedPinhole(const sensor_msgs::msg::CameraInfo& info, const char* name,
+                             bool require_negative_tx) {
+  for (const double value : info.k) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument(std::string("non-finite stereo calibration ") + name + " K");
+    }
+  }
+  for (const double value : info.p) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument(std::string("non-finite stereo calibration ") + name + " P");
+    }
+  }
+
+  requireFinitePositive(info.k[0], "K fx");
+  requireFinitePositive(info.k[4], "K fy");
+  requireFinitePositive(info.p[0], "P fx");
+  requireFinitePositive(info.p[5], "P fy");
+  const double zero = 0.0;
+  const double one = 1.0;
+  requireClose(info.k[1], zero, "K[1]");
+  requireClose(info.k[3], zero, "K[3]");
+  requireClose(info.k[6], zero, "K[6]");
+  requireClose(info.k[7], zero, "K[7]");
+  requireClose(info.k[8], one, "K[8]");
+  requireClose(info.p[1], zero, "P[1]");
+  requireClose(info.p[4], zero, "P[4]");
+  requireClose(info.p[7], zero, "P[7]");
+  requireClose(info.p[8], zero, "P[8]");
+  requireClose(info.p[9], zero, "P[9]");
+  requireClose(info.p[10], one, "P[10]");
+  requireClose(info.p[11], zero, "P[11]");
+  if (require_negative_tx) {
+    if (info.p[3] >= 0.0) {
+      throw std::invalid_argument(std::string("invalid stereo calibration ") + name + " Tx");
+    }
+  } else {
+    requireClose(info.p[3], zero, "left P Tx");
+  }
+  requireClose(info.p[0], info.k[0], "fx");
+  requireClose(info.p[5], info.k[4], "fy");
+  requireClose(info.p[2], info.k[2], "cx");
+  requireClose(info.p[6], info.k[5], "cy");
+}
+
 }  // namespace
 
 StereoCalibration Calibration::fromCameraInfo(
@@ -34,24 +78,8 @@ StereoCalibration Calibration::fromCameraInfo(
     throw std::invalid_argument("stereo image frame IDs must not be empty");
   }
 
-  requireFinitePositive(left.p[0], "left fx");
-  requireFinitePositive(left.p[5], "left fy");
-  requireFinitePositive(right.p[0], "right fx");
-  requireFinitePositive(right.p[5], "right fy");
-  requireFinitePositive(left.k[0], "left K fx");
-  requireFinitePositive(left.k[4], "left K fy");
-  requireFinitePositive(right.k[0], "right K fx");
-  requireFinitePositive(right.k[4], "right K fy");
-  for (const double value : {left.p[2], left.p[6], right.p[2], right.p[6],
-                             left.k[2], left.k[5], right.k[2], right.k[5]}) {
-    if (!std::isfinite(value)) {
-      throw std::invalid_argument("non-finite stereo calibration principal point");
-    }
-  }
-  requireClose(left.p[0], left.k[0], "left fx");
-  requireClose(left.p[5], left.k[4], "left fy");
-  requireClose(right.p[0], right.k[0], "right fx");
-  requireClose(right.p[5], right.k[4], "right fy");
+  requireRectifiedPinhole(left, "left", false);
+  requireRectifiedPinhole(right, "right", true);
   requireClose(left.p[0], right.p[0], "fx");
   requireClose(left.p[5], right.p[5], "fy");
   requireClose(left.p[2], right.p[2], "cx");

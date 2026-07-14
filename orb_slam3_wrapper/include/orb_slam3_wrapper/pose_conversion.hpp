@@ -6,12 +6,14 @@
 
 namespace orb_slam3_wrapper {
 
+// T_A_B maps coordinates expressed in frame B into frame A.
 class PoseConverter {
 public:
   explicit PoseConverter(const Eigen::Isometry3d& T_base_left_camera);
 
   Eigen::Isometry3d anchor(const Sophus::SE3f& T_world_camera);
   Eigen::Isometry3d toBasePose(const Sophus::SE3f& T_world_camera) const;
+  // Returns T_reference_current = T_world_reference^-1 * T_world_current.
   Eigen::Isometry3d referenceToFrame(
       const Sophus::SE3f& T_world_reference_camera,
       const Sophus::SE3f& T_world_current_camera) const;
