@@ -43,6 +43,12 @@ Eigen::Isometry3d PoseConverter::referenceToBaseFrame(
   return toBasePose(T_world_reference_camera).inverse() * toBasePose(T_world_current_camera);
 }
 
+Eigen::Isometry3d PoseConverter::referenceToBaseFrame(
+    const Sophus::SE3f& T_reference_camera_current_camera) const {
+  return T_camera_base_.inverse() *
+         asIsometry(T_reference_camera_current_camera.matrix().cast<double>()) * T_camera_base_;
+}
+
 bool PoseConverter::initialized() const noexcept { return initialized_; }
 
 }  // namespace orb_slam3_wrapper

@@ -6,6 +6,7 @@
 #include <opencv2/core/mat.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 
 #include <orb_slam3_wrapper/backend.hpp>
 #include <orb_slam3_wrapper/wrapper_node.hpp>
@@ -19,9 +20,19 @@ public:
   std::size_t frame_index{0};
   ORB_SLAM3::GraphSnapshot graph;
   bool changed{false};
+  int configure_calls{0};
+  bool configure_ok{true};
+  int track_calls{0};
+
+  bool configureCalibration(const orb_slam3_wrapper::StereoCalibration&, std::string& error) override {
+    ++configure_calls;
+    if (!configure_ok) error = "fake calibration rejected";
+    return configure_ok;
+  }
 
   ORB_SLAM3::FrameSnapshot trackStereo(
       const cv::Mat&, const cv::Mat&, double) override {
+    ++track_calls;
     if (frames.empty()) return frame;
     return frames[std::min(frame_index++, frames.size() - 1)];
   }
@@ -41,6 +52,21 @@ ORB_SLAM3::FrameSnapshot okFrame() {
   return result;
 }
 
+sensor_msgs::msg::CameraInfo info(bool right = false) {
+  sensor_msgs::msg::CameraInfo result;
+  result.width = 848; result.height = 480;
+  result.k[0] = result.k[4] = result.p[0] = result.p[5] = 426.9840393066406;
+  result.k[2] = result.p[2] = 430.81121826171875;
+  result.k[5] = result.p[6] = 238.95848083496094;
+  result.k[8] = result.p[10] = 1.0;
+  result.p[3] = right ? -21.429536819458008 : 0.0;
+  return result;
+}
+
+void setInfo(const std::shared_ptr<orb_slam3_wrapper::WrapperNode>& node) {
+  node->setCameraInfoForTest(info(), info(true));
+}
+
 class WrapperComponentTest : public ::testing::Test {
 protected:
   static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
@@ -52,6 +78,7 @@ TEST_F(WrapperComponentTest, FakeOkFramePublishesIdentityAnchoredTrackedFrame) {
   backend->frame = okFrame();
   auto* backend_ptr = backend.get();
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
 
   sensor_msgs::msg::Image left;
   sensor_msgs::msg::Image right;
@@ -85,6 +112,7 @@ TEST_F(WrapperComponentTest, MapChangePublishesOneSnapshotAndConservativeEvent) 
   backend->graph.revision = 4;
   backend->graph.active_map_id = 17;
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
 
   sensor_msgs::msg::Image image;
   image.header.frame_id = "left_optical";
@@ -109,6 +137,7 @@ TEST_F(WrapperComponentTest, GraphLoopEdgesAreCanonicalizedAndDeduplicated) {
   ORB_SLAM3::KeyframeSnapshot second; second.id = 10; second.map_id = 17; second.loop_edge_ids = {20};
   backend->graph.keyframes = {first, second};
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
   sensor_msgs::msg::Image image;
   image.header.frame_id = "left_optical"; image.height = image.width = 2;
   image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
@@ -137,6 +166,7 @@ TEST_F(WrapperComponentTest, RecentlyLostValidityIsPreservedButCannotAnchor) {
   auto ok = okFrame(); ok.T_world_camera.translation().x() = 11.0F;
   backend->frames = {lost, ok};
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
   sensor_msgs::msg::Image image;
   image.header.frame_id = "left_optical"; image.height = image.width = 2;
   image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
@@ -145,6 +175,46 @@ TEST_F(WrapperComponentTest, RecentlyLostValidityIsPreservedButCannotAnchor) {
   node->processStereoForTest(image, image);
   EXPECT_TRUE(node->lastTrackedFrameForTest().pose_valid);
   EXPECT_DOUBLE_EQ(node->lastTrackedFrameForTest().pose.position.x, 0.0);
+}
+
+TEST_F(WrapperComponentTest, MissingCameraInfoBlocksTracking) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame();
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  sensor_msgs::msg::Image image; image.header.frame_id = "left_optical";
+  image.height = image.width = 2; image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+  EXPECT_EQ(backend_ptr->configure_calls, 0);
+  EXPECT_EQ(node->lastTrackedFrameForTest().map_id, 0u);
+}
+
+TEST_F(WrapperComponentTest, ValidCalibrationConfiguresBackendExactlyOnceAndCoheresRevision) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame(); backend->changed = true; backend->graph.revision = 9;
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+  sensor_msgs::msg::Image image; image.header.frame_id = "left_optical";
+  image.height = image.width = 2; image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+  node->processStereoForTest(image, image);
+  EXPECT_EQ(backend_ptr->configure_calls, 1);
+  EXPECT_EQ(node->lastTrackedFrameForTest().graph_revision, 9u);
+}
+
+TEST_F(WrapperComponentTest, BackendCalibrationRejectionBlocksTrackStereo) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame(); backend->configure_ok = false;
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+  sensor_msgs::msg::Image image; image.header.frame_id = "left_optical";
+  image.height = image.width = 2; image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+  node->processStereoForTest(image, image);
+  EXPECT_EQ(backend_ptr->configure_calls, 1);
+  EXPECT_EQ(backend_ptr->track_calls, 0);
 }
 
 }  // namespace

@@ -30,6 +30,7 @@
 #include "orb_slam3_wrapper/backend.hpp"
 #include "orb_slam3_wrapper/calibration.hpp"
 #include "orb_slam3_wrapper/pose_conversion.hpp"
+#include "orb_slam3_wrapper/latest_image_worker.hpp"
 
 namespace orb_slam3_wrapper {
 
@@ -43,6 +44,8 @@ public:
   const orb_slam3_msgs::msg::TrackedFrame& lastTrackedFrameForTest() const { return last_tracked_; }
   const orb_slam3_msgs::msg::GraphSnapshot& lastGraphSnapshotForTest() const { return last_graph_; }
   const orb_slam3_msgs::msg::TrackingEvent& lastTrackingEventForTest() const { return last_event_; }
+  void setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
+                            const sensor_msgs::msg::CameraInfo& right);
   std::size_t graphPublishCountForTest() const { return graph_publish_count_; }
   std::size_t eventPublishCountForTest() const { return event_publish_count_; }
 
@@ -69,6 +72,8 @@ private:
   std::optional<sensor_msgs::msg::CameraInfo> right_info_;
   std::optional<StereoCalibration> calibration_;
   std::optional<PoseConverter> converter_;
+  bool backend_configured_{false};
+  bool backend_configuration_attempted_{false};
   int last_tracking_state_{-1};
   std::uint64_t last_graph_revision_{0};
   rclcpp::Time last_tracking_image_time_{0, 0, RCL_ROS_TIME};
@@ -92,6 +97,8 @@ private:
   orb_slam3_msgs::msg::TrackingEvent last_event_;
   std::size_t graph_publish_count_{0};
   std::size_t event_publish_count_{0};
+  std::optional<ORB_SLAM3::GraphSnapshot> previous_graph_;
+  std::unique_ptr<LatestImageWorker> image_worker_;
 };
 
 }  // namespace orb_slam3_wrapper

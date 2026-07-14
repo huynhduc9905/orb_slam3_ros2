@@ -19,7 +19,7 @@ find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(message_filters REQUIRED)
 
-add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/wrapper_node.cpp)
+add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/graph_semantics.cpp src/latest_image_worker.cpp src/wrapper_node.cpp)
 target_include_directories(orb_slam3_wrapper_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -35,6 +35,16 @@ ament_add_gtest(pose_conversion_test test/pose_conversion_test.cpp)
 target_include_directories(pose_conversion_test PRIVATE include)
 ament_target_dependencies(pose_conversion_test orb_slam3_vendor)
 target_link_libraries(pose_conversion_test orb_slam3_wrapper_core)
+
+ament_add_gtest(graph_semantics_test test/graph_semantics_test.cpp)
+target_include_directories(graph_semantics_test PRIVATE include)
+ament_target_dependencies(graph_semantics_test orb_slam3_msgs orb_slam3_vendor)
+target_link_libraries(graph_semantics_test orb_slam3_wrapper_core)
+
+ament_add_gtest(latest_image_worker_test test/latest_image_worker_test.cpp)
+target_include_directories(latest_image_worker_test PRIVATE include)
+ament_target_dependencies(latest_image_worker_test orb_slam3_vendor)
+target_link_libraries(latest_image_worker_test orb_slam3_wrapper_core)
 
 ament_add_gtest(wrapper_component_test test/wrapper_component_test.cpp)
 target_include_directories(wrapper_component_test PRIVATE include)

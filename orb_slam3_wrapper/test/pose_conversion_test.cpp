@@ -64,3 +64,16 @@ TEST(PoseConversion, ReferenceToFrameUsesNonCommutingWorldComposition) {
   expectPoseNear(actual, expected);
   EXPECT_GT((actual.matrix() - (current * reference.inverse()).matrix().cast<double>()).norm(), 0.1);
 }
+
+TEST(PoseConversion, ReferenceToBaseUsesRelativeCameraTransformAndOffsetConjugation) {
+  const auto extrinsic = opticalToBase();
+  orb_slam3_wrapper::PoseConverter converter(extrinsic);
+  converter.anchor(pose(extrinsic));
+  const auto relative = pose(Eigen::Quaternionf(Eigen::AngleAxisf(0.6F, Eigen::Vector3f::UnitZ())),
+                             Eigen::Vector3f(0.4F, -0.2F, 0.1F));
+  const auto actual = converter.referenceToBaseFrame(relative);
+  const auto cameraBase = extrinsic.inverse();
+  const auto expected = extrinsic * asIsometry(relative.matrix().cast<double>()) * cameraBase;
+  expectPoseNear(actual, expected);
+  EXPECT_GT((actual.matrix() - asIsometry(relative.matrix().cast<double>()).matrix()).norm(), 0.1);
+}

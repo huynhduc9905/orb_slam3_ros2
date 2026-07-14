@@ -6,6 +6,9 @@
 #include <tf2/exceptions.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <unordered_map>
+#include <set>
+
+#include "orb_slam3_wrapper/graph_semantics.hpp"
 
 namespace orb_slam3_wrapper {
 namespace {
@@ -76,6 +79,15 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
   loops_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/orb_slam3/loop_edges", 10);
   image_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>("/orb_slam3/tracking_image/compressed", 10);
   diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/diagnostics", 10);
+  image_worker_ = std::make_unique<LatestImageWorker>([this](const std::vector<unsigned char>& encoded,
+                                                             const std_msgs::msg::Header& header) {
+    if (!rclcpp::ok()) return;
+    sensor_msgs::msg::CompressedImage image;
+    image.header = header;
+    image.format = "jpeg";
+    image.data = encoded;
+    image_pub_->publish(image);
+  });
 
   left_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(left_info_topic_, sensor_qos,
       [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr msg) { infoCallback(msg, true); });
@@ -97,10 +109,16 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
   }
 }
 
-WrapperNode::~WrapperNode() = default;
+WrapperNode::~WrapperNode() { if (image_worker_) image_worker_->stop(); }
 
 void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left) {
   if (left) left_info_ = *msg; else right_info_ = *msg;
+}
+
+void WrapperNode::setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
+                                       const sensor_msgs::msg::CameraInfo& right) {
+  left_info_ = left;
+  right_info_ = right;
 }
 
 void WrapperNode::imageCallback(const Image::ConstSharedPtr left, const Image::ConstSharedPtr right) {
@@ -134,28 +152,44 @@ void WrapperNode::processStereoForTest(const Image& left, const Image& right) {
 
 void WrapperNode::processStereo(const Image& left, const Image& right) {
   if (!backend_) { publishDiagnostics("ERROR", "ORB backend is not configured"); return; }
-  if (!calibration_ && left_info_ && right_info_) {
+  if (!left_info_ || !right_info_) { publishDiagnostics("ERROR", "stereo CameraInfo is not available"); return; }
+  if (!calibration_) {
     try { calibration_ = Calibration::fromCameraInfo(*left_info_, *right_info_, left.header.frame_id, right.header.frame_id); }
     catch (const std::exception& error) { publishDiagnostics("ERROR", error.what()); return; }
   }
+  if (!backend_configuration_attempted_) {
+    backend_configuration_attempted_ = true;
+    std::string error;
+    if (!backend_->configureCalibration(*calibration_, error)) {
+      publishDiagnostics("ERROR", error.empty() ? "backend calibration validation failed" : error);
+      return;
+    }
+    backend_configured_ = true;
+  }
+  if (!backend_configured_) return;
   if (!converter_ && !resolveExtrinsic(left.header.frame_id, rclcpp::Time(left.header.stamp))) return;
 
   const auto stamp = rclcpp::Time(left.header.stamp);
   const auto frame = backend_->trackStereo(mono8(left), mono8(right), stamp.seconds());
+  std::optional<ORB_SLAM3::GraphSnapshot> graph_to_publish;
+  if (backend_->mapChanged()) {
+    const auto graph = backend_->graphSnapshot();
+    if (graph.revision != last_graph_revision_) graph_to_publish = graph;
+  }
   orb_slam3_msgs::msg::TrackedFrame output;
   output.header.stamp = left.header.stamp; output.header.frame_id = map_frame_;
   output.tracking_state = static_cast<std::uint8_t>(frame.tracking_state);
   output.pose_valid = frame.pose_valid;
   output.map_id = frame.map_id; output.reference_keyframe_id = frame.reference_keyframe_id;
   output.tracked_keypoints = static_cast<std::uint32_t>(frame.tracked_keypoints);
-  output.graph_revision = last_graph_revision_;
+  output.graph_revision = graph_to_publish ? graph_to_publish->revision : last_graph_revision_;
   if (frame.pose_valid && converter_) {
     if (frame.tracking_state == orb_slam3_msgs::msg::TrackedFrame::OK && !converter_->initialized())
       converter_->anchor(frame.T_world_camera);
     if (converter_->initialized()) {
       output.pose = poseMsg(converter_->toBasePose(frame.T_world_camera));
       output.reference_to_frame = transformMsg(converter_->referenceToBaseFrame(
-          frame.T_world_camera, frame.T_world_camera));
+          frame.T_reference_camera_current_camera));
     } else if (frame.tracking_state == orb_slam3_msgs::msg::TrackedFrame::OK) {
       output.pose_valid = false;
     }
@@ -177,15 +211,11 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
   }
   last_tracking_state_ = frame.tracking_state;
 
-  if (backend_->mapChanged()) {
-    const auto graph = backend_->graphSnapshot();
-    if (graph.revision != last_graph_revision_) publishGraph(graph, output.header);
-  }
+  if (graph_to_publish) publishGraph(*graph_to_publish, output.header);
+
   if (tracking_image_rate_hz_ > 0.0 && (last_tracking_image_time_.nanoseconds() == 0 ||
       (stamp - last_tracking_image_time_).seconds() >= 1.0 / tracking_image_rate_hz_)) {
-    std::vector<unsigned char> encoded; cv::imencode(".jpg", mono8(left), encoded);
-    sensor_msgs::msg::CompressedImage image; image.header = output.header; image.format = "jpeg"; image.data = encoded;
-    image_pub_->publish(image); last_tracking_image_time_ = stamp;
+    if (image_worker_->submit(mono8(left), output.header)) last_tracking_image_time_ = stamp;
   }
 }
 
@@ -193,7 +223,7 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
   orb_slam3_msgs::msg::GraphSnapshot output; output.header = header; output.revision = graph.revision;
   output.active_map_id = graph.active_map_id; output.active_map_connected = graph.active_map_connected;
   nav_msgs::msg::Path path; path.header = header;
-  std::unordered_set<std::uint64_t> edges;
+  std::set<std::pair<std::uint64_t, std::uint64_t>> edges;
   std::unordered_map<std::uint64_t, geometry_msgs::msg::Point> points;
   visualization_msgs::msg::MarkerArray keyframe_markers, loop_markers;
   visualization_msgs::msg::Marker keyframe_marker; keyframe_marker.header = header;
@@ -214,9 +244,11 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
     keyframe_marker.points.push_back(key.pose.position); points[keyframe.id] = key.pose.position;
     output.keyframes.push_back(key);
     geometry_msgs::msg::PoseStamped pose; pose.header = header; pose.pose = key.pose; path.poses.push_back(pose);
+  }
+  for (const auto& keyframe : graph.keyframes) {
     for (auto id : keyframe.loop_edge_ids) {
       const auto a = std::min(keyframe.id, id), b = std::max(keyframe.id, id);
-      if (edges.insert((a * 1315423911ULL) ^ b).second) {
+      if (edges.emplace(a, b).second) {
         orb_slam3_msgs::msg::LoopEdge edge; edge.map_id = keyframe.map_id;
         edge.from_id = a; edge.to_id = b; output.loop_edges.push_back(edge);
         if (points.count(a) && points.count(b)) { loop_marker.points.push_back(points[a]); loop_marker.points.push_back(points[b]); }
@@ -226,11 +258,14 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
   graph_pub_->publish(output); path_pub_->publish(path); last_graph_ = output; ++graph_publish_count_;
   keyframe_markers.markers.push_back(keyframe_marker); loop_markers.markers.push_back(loop_marker);
   keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
+  for (const auto type : classifyGraphDelta(previous_graph_, graph)) {
+    orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = type;
+    event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
+    event.detail = "semantic graph evidence observed in snapshot delta";
+    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+  }
+  previous_graph_ = graph;
   last_graph_revision_ = graph.revision; last_tracked_.graph_revision = graph.revision;
-  orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = orb_slam3_msgs::msg::TrackingEvent::MAP_CREATED;
-  event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
-  event.detail = "graph revision changed; loop closure not asserted without snapshot evidence";
-  events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
 }
 
 void WrapperNode::publishDiagnostics(const std::string& level, const std::string& message) {
