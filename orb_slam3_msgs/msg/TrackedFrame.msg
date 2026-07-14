@@ -1,0 +1,14 @@
+std_msgs/Header header
+uint8 NO_IMAGES_YET=0
+uint8 NOT_INITIALIZED=1
+uint8 OK=2
+uint8 RECENTLY_LOST=3
+uint8 LOST=4
+uint8 tracking_state
+bool pose_valid
+uint64 map_id
+uint64 reference_keyframe_id
+geometry_msgs/Pose pose
+geometry_msgs/Transform reference_to_frame
+uint64 graph_revision
+uint32 tracked_keypoints

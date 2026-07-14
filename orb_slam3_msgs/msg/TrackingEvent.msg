@@ -1,0 +1,13 @@
+std_msgs/Header header
+uint8 INITIALIZED=0
+uint8 LOST=1
+uint8 RELOCALIZED=2
+uint8 LOOP_CLOSED=3
+uint8 MAP_CREATED=4
+uint8 MAP_MERGED=5
+uint8 MAP_RESET=6
+uint8 type
+uint64 graph_revision
+uint64 map_id
+uint64 keyframe_id
+string detail
