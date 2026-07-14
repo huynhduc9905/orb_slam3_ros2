@@ -10,12 +10,17 @@ find_package(OpenSSL REQUIRED)
 set(UPSTREAM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ORB_SLAM3")
 set(PATCHED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/ORB_SLAM3")
 file(REMOVE_RECURSE "${PATCHED_SOURCE}")
-file(COPY "${UPSTREAM_SOURCE}/" DESTINATION "${PATCHED_SOURCE}")
 execute_process(
-  COMMAND git apply --whitespace=error-all
-          "${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-modern-headless-install.patch"
-  WORKING_DIRECTORY "${PATCHED_SOURCE}"
+  COMMAND git clone --no-hardlinks "${UPSTREAM_SOURCE}" "${PATCHED_SOURCE}"
   COMMAND_ERROR_IS_FATAL ANY)
+file(GLOB PATCH_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
+list(SORT PATCH_FILES)
+foreach(PATCH_FILE IN LISTS PATCH_FILES)
+  execute_process(
+    COMMAND git apply --3way --whitespace=error-all "${PATCH_FILE}"
+    WORKING_DIRECTORY "${PATCHED_SOURCE}"
+    COMMAND_ERROR_IS_FATAL ANY)
+endforeach()
 
 file(ARCHIVE_EXTRACT
   INPUT "${PATCHED_SOURCE}/Vocabulary/ORBvoc.txt.tar.gz"
@@ -29,6 +34,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(vendor_link_test test/vendor_link_test.cpp)
   target_link_libraries(vendor_link_test ORB_SLAM3::ORB_SLAM3)
+  ament_add_gtest(snapshot_value_test test/snapshot_value_test.cpp)
+  target_link_libraries(snapshot_value_test ORB_SLAM3::ORB_SLAM3)
   add_test(NAME installed_consumer
     COMMAND ${CMAKE_COMMAND}
       -DTEST_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/installed_consumer
