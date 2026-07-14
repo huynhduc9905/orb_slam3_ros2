@@ -51,6 +51,11 @@ target_include_directories(wrapper_component_test PRIVATE include)
 ament_target_dependencies(wrapper_component_test rclcpp sensor_msgs orb_slam3_msgs)
 target_link_libraries(wrapper_component_test orb_slam3_wrapper_core)
 
+ament_add_gtest(backend_geometry_test test/backend_geometry_test.cpp)
+target_include_directories(backend_geometry_test PRIVATE include)
+ament_target_dependencies(backend_geometry_test orb_slam3_vendor)
+target_link_libraries(backend_geometry_test orb_slam3_wrapper_core)
+
 install(TARGETS orb_slam3_wrapper_core EXPORT orb_slam3_wrapper_targets)
 add_executable(orb_slam3_wrapper_node src/main.cpp)
 target_link_libraries(orb_slam3_wrapper_node orb_slam3_wrapper_core)

@@ -10,6 +10,8 @@
 
 namespace orb_slam3_wrapper {
 
+bool validRectifiedStereoTransform(const cv::Mat& transform, double baseline_m);
+
 class SlamBackend {
 public:
   virtual ~SlamBackend() = default;

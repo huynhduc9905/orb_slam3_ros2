@@ -7,6 +7,34 @@
 
 namespace orb_slam3_wrapper {
 
+bool validRectifiedStereoTransform(const cv::Mat& transform, double baseline_m) {
+  if (transform.rows != 4 || transform.cols != 4 || transform.type() != CV_32F ||
+      !std::isfinite(baseline_m) || baseline_m <= 0.0) return false;
+  const auto close = [](double a, double b) { return std::isfinite(a) && std::isfinite(b) &&
+      std::abs(a - b) <= 1e-6 * std::max({1.0, std::abs(a), std::abs(b)}); };
+  for (int row = 0; row < 4; ++row) for (int col = 0; col < 4; ++col)
+    if (!std::isfinite(static_cast<double>(transform.at<float>(row, col)))) return false;
+  if (!close(transform.at<float>(3, 0), 0.0) || !close(transform.at<float>(3, 1), 0.0) ||
+      !close(transform.at<float>(3, 2), 0.0) || !close(transform.at<float>(3, 3), 1.0)) return false;
+
+  double gram[3][3]{};
+  for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col)
+    for (int k = 0; k < 3; ++k)
+      gram[row][col] += transform.at<float>(k, row) * transform.at<float>(k, col);
+  for (int row = 0; row < 3; ++row) for (int col = 0; col < 3; ++col)
+    if (!close(gram[row][col], row == col ? 1.0 : 0.0) ||
+        !close(transform.at<float>(row, col), row == col ? 1.0 : 0.0)) return false;
+  const double determinant =
+      transform.at<float>(0, 0) * (transform.at<float>(1, 1) * transform.at<float>(2, 2) -
+                                   transform.at<float>(1, 2) * transform.at<float>(2, 1)) -
+      transform.at<float>(0, 1) * (transform.at<float>(1, 0) * transform.at<float>(2, 2) -
+                                   transform.at<float>(1, 2) * transform.at<float>(2, 0)) +
+      transform.at<float>(0, 2) * (transform.at<float>(1, 0) * transform.at<float>(2, 1) -
+                                   transform.at<float>(1, 1) * transform.at<float>(2, 0));
+  return close(determinant, 1.0) && close(transform.at<float>(0, 3), baseline_m) &&
+      close(transform.at<float>(1, 3), 0.0) && close(transform.at<float>(2, 3), 0.0);
+}
+
 OrbSlam3Backend::OrbSlam3Backend(const std::string& vocabulary, const std::string& settings)
 : vocabulary_path_(vocabulary), settings_path_(settings) {}
 
@@ -42,13 +70,7 @@ bool OrbSlam3Backend::configureCalibration(const StereoCalibration& calibration,
   const auto left_frame = static_cast<std::string>(settings["Camera1.image_frame"]);
   const auto right_frame = static_cast<std::string>(settings["Camera2.image_frame"]);
   cv::Mat transform = settings["Stereo.T_c1_c2"].mat();
-  bool matrix_ok = transform.rows == 4 && transform.cols == 4 && transform.type() == CV_32F;
-  if (matrix_ok) {
-    for (int row = 0; row < transform.rows; ++row) for (int col = 0; col < transform.cols; ++col)
-      matrix_ok = matrix_ok && std::isfinite(static_cast<double>(transform.at<float>(row, col)));
-    matrix_ok = matrix_ok && close(transform.at<float>(3, 0), 0.0) && close(transform.at<float>(3, 1), 0.0) &&
-      close(transform.at<float>(3, 2), 0.0) && close(transform.at<float>(3, 3), 1.0);
-  }
+  const bool matrix_ok = validRectifiedStereoTransform(transform, calibration.baseline_m);
   const bool valid = type == "PinHole" && left_frame == calibration.left_frame &&
       right_frame == calibration.right_frame && left_frame != right_frame && matrix_ok &&
       static_cast<int>(settings["Camera.width"]) == calibration.width &&
@@ -61,8 +83,7 @@ bool OrbSlam3Backend::configureCalibration(const StereoCalibration& calibration,
       close(static_cast<double>(settings["Camera2.fy"]), calibration.fy) &&
       close(static_cast<double>(settings["Camera2.cx"]), calibration.cx) &&
       close(static_cast<double>(settings["Camera2.cy"]), calibration.cy) &&
-      close(static_cast<double>(settings["Stereo.b"]), calibration.baseline_m) &&
-      close(cv::norm(transform(cv::Range(0, 3), cv::Range(3, 4))), calibration.baseline_m);
+      close(static_cast<double>(settings["Stereo.b"]), calibration.baseline_m);
   if (!valid) { error = "CameraInfo does not match the complete ORB stereo settings contract"; return false; }
   try {
     system_ = std::make_unique<ORB_SLAM3::System>(vocabulary_path_, settings_path_, ORB_SLAM3::System::STEREO, false);
