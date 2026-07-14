@@ -17,6 +17,9 @@ public:
   Eigen::Isometry3d referenceToFrame(
       const Sophus::SE3f& T_world_reference_camera,
       const Sophus::SE3f& T_world_current_camera) const;
+  Eigen::Isometry3d referenceToBaseFrame(
+      const Sophus::SE3f& T_world_reference_camera,
+      const Sophus::SE3f& T_world_current_camera) const;
   bool initialized() const noexcept;
 
 private:
