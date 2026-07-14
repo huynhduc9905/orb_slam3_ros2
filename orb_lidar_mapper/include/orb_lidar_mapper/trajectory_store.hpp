@@ -51,6 +51,7 @@ struct KeyframeValue {
 struct GraphSnapshotValue {
   std::uint64_t graph_revision{};
   std::uint64_t active_map_id{};
+  bool active_map_connected{};
   std::vector<KeyframeValue> keyframes;
 };
 
@@ -74,10 +75,14 @@ class TrajectoryStore {
   std::optional<std::size_t> latestValidFrameAt(std::int64_t stamp_ns) const;
   std::optional<Pose2> poseFromFrame(std::size_t frame_index, std::int64_t stamp_ns) const;
   std::optional<double> cumulativeWheelDistance(
-    std::int64_t from_ns, std::int64_t to_ns) const;
+    std::int64_t from_ns, const Pose2& from_pose, std::int64_t to_ns,
+    const Pose2& to_pose) const;
+  void finalizeInterval(std::size_t interval_index);
+  void pruneWheelHistory();
   void publish();
 
   TimedPoseBuffer wheels_;
+  TrajectoryConfig config_;
   std::vector<TimedPose2> wheel_history_;
   std::vector<FrameAnchor> frames_;
   std::vector<StoredScan> scans_;
