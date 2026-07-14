@@ -82,5 +82,62 @@ TEST(ScanDeskewer, RejectsTimestampArithmeticOverflow) {
   EXPECT_FALSE(ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels).has_value());
 }
 
+TEST(ScanDeskewer, SkipsInvalidBeamBeforeItsStaleInterpolation) {
+  ScanValue scan = oneRay(0, 0.0F, 1.0F);
+  scan.time_increment = 0.2F;
+  scan.ranges.push_back(std::numeric_limits<float>::quiet_NaN());
+  TimedPoseBuffer wheels(1'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(wheels.push({0, Pose2{}}));
+  ASSERT_TRUE(wheels.push({200'000'000, Pose2{}}));
+
+  const auto rays = ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels);
+  ASSERT_TRUE(rays.has_value());
+  ASSERT_EQ(rays->size(), 1U);
+  EXPECT_NEAR(rays->front().end.x, 1.0, 1e-9);
+}
+
+TEST(ScanDeskewer, RejectsScanWhenAValidBeamHasStaleInterpolation) {
+  ScanValue scan = oneRay(0, 0.0F, 1.0F);
+  scan.time_increment = 0.2F;
+  scan.ranges.push_back(1.0F);
+  TimedPoseBuffer wheels(1'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(wheels.push({0, Pose2{}}));
+  ASSERT_TRUE(wheels.push({200'000'000, Pose2{}}));
+
+  EXPECT_FALSE(ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels).has_value());
+}
+
+TEST(ScanDeskewer, RepresentsInfinityAsFiniteRangeMaxClearingRay) {
+  const ScanValue scan = oneRay(0, 0.0F, std::numeric_limits<float>::infinity());
+  const auto rays = ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, stationaryWheelBuffer());
+  ASSERT_TRUE(rays.has_value());
+  ASSERT_EQ(rays->size(), 1U);
+  EXPECT_FALSE(rays->front().has_hit);
+  EXPECT_TRUE(std::isfinite(rays->front().end.x));
+  EXPECT_TRUE(std::isfinite(rays->front().end.y));
+  EXPECT_NEAR(rays->front().end.x, scan.range_max, 1e-6);
+}
+
+TEST(ScanDeskewer, RejectsInvalidScanFields) {
+  const auto invalid = [](ScanValue scan) {
+    EXPECT_FALSE(ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, stationaryWheelBuffer()).has_value());
+  };
+  ScanValue scan = oneRay(0, 0.0F, 1.0F);
+  scan.range_min = -0.1F;
+  invalid(scan);
+  scan = oneRay(0, 0.0F, 1.0F);
+  scan.range_max = std::numeric_limits<float>::infinity();
+  invalid(scan);
+  scan = oneRay(0, 0.0F, 1.0F);
+  scan.angle_min = std::numeric_limits<float>::quiet_NaN();
+  invalid(scan);
+  scan = oneRay(0, 0.0F, 1.0F);
+  scan.angle_increment = std::numeric_limits<float>::infinity();
+  invalid(scan);
+  scan = oneRay(0, 0.0F, 1.0F);
+  scan.time_increment = std::numeric_limits<float>::quiet_NaN();
+  invalid(scan);
+}
+
 }  // namespace
 }  // namespace orb_lidar_mapper

@@ -19,34 +19,18 @@ struct GridConfig {
   double usable_range_m{12.0};
 };
 
-struct GridCell {
-  float log_odds{};
-  bool observed{};
-
-  bool operator==(const GridCell& rhs) const {
-    return log_odds == rhs.log_odds && observed == rhs.observed;
-  }
-};
-
-struct GridTileSnapshot {
-  std::int64_t tile_x{};
-  std::int64_t tile_y{};
-  std::vector<GridCell> cells;
-
-  bool operator==(const GridTileSnapshot& rhs) const {
-    return tile_x == rhs.tile_x && tile_y == rhs.tile_y && cells == rhs.cells;
-  }
-};
-
 struct GridSnapshot {
-  float occupied_threshold{0.619F};
-  float free_threshold{-0.619F};
-  std::vector<GridTileSnapshot> tiles;
+  double resolution_m{};
+  double origin_x{};
+  double origin_y{};
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::vector<std::int8_t> cells;
 
-  int8_t cellAt(Point2 cell) const;
+  std::int8_t cellAt(std::int64_t cell_x, std::int64_t cell_y) const;
   bool operator==(const GridSnapshot& rhs) const {
-    return occupied_threshold == rhs.occupied_threshold && free_threshold == rhs.free_threshold &&
-           tiles == rhs.tiles;
+    return resolution_m == rhs.resolution_m && origin_x == rhs.origin_x && origin_y == rhs.origin_y &&
+           width == rhs.width && height == rhs.height && cells == rhs.cells;
   }
 };
 

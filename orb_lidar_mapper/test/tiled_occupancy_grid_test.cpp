@@ -1,6 +1,5 @@
 #include <cmath>
 #include <limits>
-#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -34,9 +33,33 @@ TEST(TiledOccupancyGrid, MarksFreeTraversalAndFiniteHitEndpoint) {
   grid.insert({ray(2.0), ray(2.0)});
 
   const GridSnapshot snapshot = grid.snapshot();
-  EXPECT_EQ(snapshot.cellAt({0, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({1, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({2, 0}), 100);
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(2, 0), 100);
+}
+
+TEST(TiledOccupancyGrid, ProducesTaskFourCompatibleDenseSnapshotMetadataAndCells) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  TiledOccupancyGrid grid(config);
+  grid.insert({{{-1.0, 0.0}, {1.0, 0.0}, true},
+               {{-1.0, 0.0}, {1.0, 0.0}, true},
+               {{65.0, 64.0}, {66.0, 64.0}, true}});
+  grid.insert({{{65.0, 64.0}, {66.0, 64.0}, true}});
+
+  const GridSnapshot snapshot = grid.snapshot();
+  EXPECT_DOUBLE_EQ(snapshot.resolution_m, 1.0);
+  EXPECT_DOUBLE_EQ(snapshot.origin_x, -64.0);
+  EXPECT_DOUBLE_EQ(snapshot.origin_y, 0.0);
+  EXPECT_EQ(snapshot.width, 192U);
+  EXPECT_EQ(snapshot.height, 128U);
+  ASSERT_EQ(snapshot.cells.size(), 192U * 128U);
+  EXPECT_EQ(snapshot.cellAt(-1, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 100);
+  EXPECT_EQ(snapshot.cellAt(65, 64), 0);
+  EXPECT_EQ(snapshot.cellAt(66, 64), 100);
+  EXPECT_EQ(snapshot.cellAt(-64, 127), -1);
 }
 
 TEST(TiledOccupancyGrid, InfinityClearsWithoutOccupiedEndpointAndInvalidRangesAreSkipped) {
@@ -49,11 +72,26 @@ TEST(TiledOccupancyGrid, InfinityClearsWithoutOccupiedEndpointAndInvalidRangesAr
                ray(std::numeric_limits<double>::quiet_NaN())});
 
   const GridSnapshot snapshot = grid.snapshot();
-  EXPECT_EQ(snapshot.cellAt({0, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({1, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({2, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({3, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({4, 0}), -1);
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(2, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(3, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(4, 0), -1);
+}
+
+TEST(TiledOccupancyGrid, FiniteRayBeyondUsableRangeClearsWithoutOccupiedEndpoint) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  config.usable_range_m = 3.0;
+  TiledOccupancyGrid grid(config);
+  grid.insert({ray(10.0), ray(10.0)});
+
+  const GridSnapshot snapshot = grid.snapshot();
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(2, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(3, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(4, 0), -1);
 }
 
 TEST(TiledOccupancyGrid, UsesSignedFloorCellsAndNegativeTileKeys) {
@@ -64,11 +102,8 @@ TEST(TiledOccupancyGrid, UsesSignedFloorCellsAndNegativeTileKeys) {
                {{-64.1, -0.1}, {-65.1, -0.1}, true}});
 
   const GridSnapshot snapshot = grid.snapshot();
-  EXPECT_EQ(snapshot.cellAt({-65, -1}), 0);
-  EXPECT_EQ(snapshot.cellAt({-66, -1}), 100);
-  ASSERT_EQ(snapshot.tiles.size(), 1U);
-  EXPECT_EQ(snapshot.tiles[0].tile_x, -2);
-  EXPECT_EQ(snapshot.tiles[0].tile_y, -1);
+  EXPECT_EQ(snapshot.cellAt(-65, -1), 0);
+  EXPECT_EQ(snapshot.cellAt(-66, -1), 100);
 }
 
 TEST(TiledOccupancyGrid, SaturatesLogOddsAndKeepsAmbiguousObservedCellsUnknown) {
@@ -80,13 +115,11 @@ TEST(TiledOccupancyGrid, SaturatesLogOddsAndKeepsAmbiguousObservedCellsUnknown) 
     grid.insert({ray(0.0)});
   }
   const auto saturated = grid.snapshot();
-  ASSERT_EQ(saturated.tiles.size(), 1U);
-  EXPECT_FLOAT_EQ(saturated.tiles[0].cells[0].log_odds, config.max_log_odds);
-  EXPECT_EQ(saturated.cellAt({0, 0}), 100);
+  EXPECT_EQ(saturated.cellAt(0, 0), 100);
 
   TiledOccupancyGrid ambiguous(config);
   ambiguous.insert({{{0.0, 0.0}, {1.0, 0.0}, true}});
-  EXPECT_EQ(ambiguous.snapshot().cellAt({0, 0}), -1);
+  EXPECT_EQ(ambiguous.snapshot().cellAt(0, 0), -1);
 }
 
 TEST(TiledOccupancyGrid, ClassifiesSnapshotUsingConfiguredThresholds) {
@@ -98,11 +131,11 @@ TEST(TiledOccupancyGrid, ClassifiesSnapshotUsingConfiguredThresholds) {
   grid.insert({{{0.0, 0.0}, {1.0, 0.0}, true}});
 
   const GridSnapshot snapshot = grid.snapshot();
-  EXPECT_EQ(snapshot.cellAt({0, 0}), 0);
-  EXPECT_EQ(snapshot.cellAt({1, 0}), 100);
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 100);
 }
 
-TEST(TiledOccupancyGrid, SerializesSortedTilesAndCellsIndependentOfInsertionOrder) {
+TEST(TiledOccupancyGrid, SerializesDenseBoundsAndCellsIndependentOfInsertionOrder) {
   GridConfig config;
   config.resolution_m = 1.0;
   config.usable_range_m = 100.0;
@@ -113,12 +146,59 @@ TEST(TiledOccupancyGrid, SerializesSortedTilesAndCellsIndependentOfInsertionOrde
   second.insert({rays[1], rays[0]});
 
   EXPECT_EQ(first.snapshot(), second.snapshot());
-  const auto snapshot = first.snapshot();
-  ASSERT_GE(snapshot.tiles.size(), 2U);
-  for (std::size_t index = 1; index < snapshot.tiles.size(); ++index) {
-    EXPECT_LE(std::tie(snapshot.tiles[index - 1].tile_y, snapshot.tiles[index - 1].tile_x),
-              std::tie(snapshot.tiles[index].tile_y, snapshot.tiles[index].tile_x));
-  }
+}
+
+TEST(TiledOccupancyGrid, SkipsExtremeFiniteRaysWithoutThrowing) {
+  TiledOccupancyGrid grid;
+  EXPECT_NO_THROW(grid.insert({{{1.0e300, 1.0e300}, {1.0e300, 1.0e300}, true},
+                               {{-1.0e300, 0.0}, {-1.0e300, 1.0}, false}}));
+  EXPECT_TRUE(grid.snapshot().cells.empty());
+}
+
+TEST(TiledOccupancyGrid, RejectsInvalidConfigurations) {
+  const auto invalid = [](GridConfig config) {
+    EXPECT_THROW(TiledOccupancyGrid grid(config), std::invalid_argument);
+  };
+  GridConfig config;
+  config.resolution_m = std::numeric_limits<double>::infinity();
+  invalid(config);
+  config = {};
+  config.usable_range_m = std::numeric_limits<double>::quiet_NaN();
+  invalid(config);
+  config = {};
+  config.tile_size = 63;
+  invalid(config);
+  config = {};
+  config.hit_log_odds = std::numeric_limits<float>::infinity();
+  invalid(config);
+  config = {};
+  config.min_log_odds = 1.0F;
+  config.max_log_odds = -1.0F;
+  invalid(config);
+  config = {};
+  config.miss_log_odds = 0.0F;
+  invalid(config);
+  config = {};
+  config.free_threshold = config.occupied_threshold;
+  invalid(config);
+  config = {};
+  config.occupied_threshold = config.max_log_odds + 1.0F;
+  invalid(config);
+}
+
+TEST(TiledOccupancyGrid, UsesExactThresholdBoundaries) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  config.hit_log_odds = 1.0F;
+  config.miss_log_odds = -1.0F;
+  config.min_log_odds = -1.0F;
+  config.max_log_odds = 1.0F;
+  config.free_threshold = -1.0F;
+  config.occupied_threshold = 1.0F;
+  TiledOccupancyGrid grid(config);
+  grid.insert({{{0.0, 0.0}, {1.0, 0.0}, true}});
+  EXPECT_EQ(grid.snapshot().cellAt(0, 0), 0);
+  EXPECT_EQ(grid.snapshot().cellAt(1, 0), 100);
 }
 
 }  // namespace
