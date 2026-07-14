@@ -40,6 +40,7 @@ if(BUILD_TESTING)
   target_link_libraries(snapshot_value_test ORB_SLAM3::ORB_SLAM3)
   set_tests_properties(snapshot_value_test PROPERTIES TIMEOUT 10)
   ament_add_gtest(system_shutdown_test test/system_shutdown_test.cpp)
+  target_compile_definitions(system_shutdown_test PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
   target_link_libraries(system_shutdown_test ORB_SLAM3::ORB_SLAM3)
   set_tests_properties(system_shutdown_test PROPERTIES
     TIMEOUT 30
