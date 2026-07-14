@@ -41,6 +41,10 @@ class TiledOccupancyGrid {
  public:
   explicit TiledOccupancyGrid(GridConfig config = {});
   ~TiledOccupancyGrid();
+  TiledOccupancyGrid(const TiledOccupancyGrid&);
+  TiledOccupancyGrid& operator=(const TiledOccupancyGrid&);
+  TiledOccupancyGrid(TiledOccupancyGrid&&) noexcept;
+  TiledOccupancyGrid& operator=(TiledOccupancyGrid&&) noexcept;
 
   void insert(const std::vector<Ray2>& rays);
   GridSnapshot snapshot() const;

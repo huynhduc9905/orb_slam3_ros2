@@ -43,6 +43,8 @@ struct RebuildStatus {
 // A narrow deterministic seam for tests that need to block or throw between scans.
 struct MapRebuilderTestHooks {
   std::function<void(std::uint64_t graph_revision, std::uint64_t scan_id)> before_rebuild_scan;
+  std::function<void(std::uint64_t graph_revision)> before_full_commit;
+  std::function<void(std::uint64_t scan_id)> before_incremental_commit;
 };
 
 class MapRebuilder {
@@ -63,7 +65,7 @@ class MapRebuilder {
 
  private:
   struct Impl;
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace orb_lidar_mapper

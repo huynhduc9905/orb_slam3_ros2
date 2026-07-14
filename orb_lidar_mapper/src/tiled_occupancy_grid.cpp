@@ -64,6 +64,10 @@ struct TiledOccupancyGrid::Tile {
 };
 
 TiledOccupancyGrid::~TiledOccupancyGrid() = default;
+TiledOccupancyGrid::TiledOccupancyGrid(const TiledOccupancyGrid&) = default;
+TiledOccupancyGrid& TiledOccupancyGrid::operator=(const TiledOccupancyGrid&) = default;
+TiledOccupancyGrid::TiledOccupancyGrid(TiledOccupancyGrid&&) noexcept = default;
+TiledOccupancyGrid& TiledOccupancyGrid::operator=(TiledOccupancyGrid&&) noexcept = default;
 
 std::int8_t GridSnapshot::cellAt(std::int64_t cell_x, std::int64_t cell_y) const {
   if (!std::isfinite(resolution_m) || resolution_m <= 0.0 || !std::isfinite(origin_x) ||

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -50,128 +51,194 @@ std::shared_ptr<const ScanArchive> archive(std::vector<ArchivedScan> scans) {
   return value;
 }
 
-TEST(MapRebuilder, IncrementalAppendPublishesTransformedCommittedScanWithoutArchiveReplay) {
-  std::mutex mutex;
+class Recorder {
+ public:
+  void record(std::shared_ptr<const MapSnapshot> snapshot, const RebuildStatus& status) {
+    std::lock_guard<std::mutex> lock(mutex);
+    snapshots.push_back(std::move(snapshot));
+    statuses.push_back(status);
+    cv.notify_all();
+  }
+  bool waitFor(std::size_t count) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return cv.wait_for(lock, 2s, [&] { return statuses.size() >= count; });
+  }
+  bool waitForPublishedRevision(std::uint64_t revision) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return cv.wait_for(lock, 2s, [&] {
+      for (const RebuildStatus& status : statuses)
+        if (status.state == RebuildState::kPublished && status.graph_revision == revision) return true;
+      return false;
+    });
+  }
+  bool saw(RebuildState state, std::uint64_t revision) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const RebuildStatus& status : statuses)
+      if (status.state == state && status.graph_revision == revision) return true;
+    return false;
+  }
+  std::size_t published(std::uint64_t revision) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::size_t result{};
+    for (const RebuildStatus& status : statuses)
+      if (status.state == RebuildState::kPublished && status.graph_revision == revision) ++result;
+    return result;
+  }
+  mutable std::mutex mutex;
   std::condition_variable cv;
-  std::vector<std::shared_ptr<const MapSnapshot>> published;
+  std::vector<std::shared_ptr<const MapSnapshot>> snapshots;
+  std::vector<RebuildStatus> statuses;
+};
+
+TEST(MapRebuilder, IncrementalAppendPublishesImmutableSnapshot) {
+  Recorder recorder;
   GridConfig config; config.resolution_m = 1.0;
-  MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus&) {
-    std::lock_guard<std::mutex> lock(mutex); published.push_back(std::move(snapshot)); cv.notify_all();
-  });
+  MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
 
   rebuilder.appendCommitted(scan(1), pose(1, 4.0), 7);
-  std::unique_lock<std::mutex> lock(mutex);
-  ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return published.size() == 1; }));
-  const auto first = published.front();
-  EXPECT_EQ(first->graph_revision, 7U);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(7));
+  const auto first = rebuilder.current();
+  ASSERT_NE(first, nullptr);
   EXPECT_EQ(first->map_revision, 1U);
   EXPECT_EQ(first->committed_scan_count, 1U);
   EXPECT_EQ(first->grid.cellAt(5, 0), 100);
-  EXPECT_EQ(rebuilder.current(), first);
+  EXPECT_TRUE(recorder.saw(RebuildState::kIdle, 7));
+  rebuilder.appendCommitted(scan(2, 2.0), pose(2), 7);
+  ASSERT_TRUE(recorder.waitFor(4));
+  EXPECT_EQ(first->committed_scan_count, 1U);
+  EXPECT_EQ(first->grid.cellAt(2, 0), -1);
 }
 
-TEST(MapRebuilder, KeepsPreviousSnapshotAndCoalescesToNewestRebuild) {
-  Gate gate;
-  std::mutex mutex;
-  std::condition_variable cv;
-  std::vector<std::uint64_t> published;
-  GridConfig config; config.resolution_m = 1.0;
+TEST(MapRebuilder, NewerRequestAtFinalGatePreventsObsoletePublication) {
+  Gate final_gate;
+  Recorder recorder;
   MapRebuilderTestHooks hooks;
-  hooks.before_rebuild_scan = [&](std::uint64_t revision, std::uint64_t) {
-    if (revision == 2) { gate.arrive(); gate.block(); }
+  hooks.before_full_commit = [&](std::uint64_t revision) {
+    if (revision == 2) { final_gate.arrive(); final_gate.block(); }
   };
-  MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus& status) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (status.state == RebuildState::kPublished) published.push_back(snapshot->graph_revision);
-    cv.notify_all();
-  }, hooks);
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
 
   rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return published.size() == 1; })); }
-  const auto old = rebuilder.current();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
   rebuilder.requestRebuild(trajectory(2, {pose(2)}), archive({scan(2)}));
-  gate.wait();
-  EXPECT_EQ(rebuilder.current(), old);
+  final_gate.wait();
   rebuilder.requestRebuild(trajectory(3, {pose(3, 10.0)}), archive({scan(3)}));
-  gate.release();
-  std::unique_lock<std::mutex> lock(mutex);
-  ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return published.size() == 2; }));
-  EXPECT_EQ(published, (std::vector<std::uint64_t>{1, 3}));
+  final_gate.release();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(3));
+  EXPECT_EQ(recorder.published(2), 0U);
   EXPECT_EQ(rebuilder.current()->graph_revision, 3U);
-  EXPECT_EQ(rebuilder.current()->grid.cellAt(11, 0), 100);
 }
 
-TEST(MapRebuilder, FailurePreservesSnapshotAndWorkerRecovers) {
-  std::mutex mutex;
-  std::condition_variable cv;
-  std::vector<RebuildStatus> statuses;
+TEST(MapRebuilder, FailedRepresentedRebuildRetainsIncrementalForRecovery) {
+  Gate gate;
+  Recorder recorder;
   bool fail = true;
   MapRebuilderTestHooks hooks;
   hooks.before_rebuild_scan = [&](std::uint64_t revision, std::uint64_t) {
-    if (revision == 2 && fail) throw std::runtime_error("injected");
+    if (revision == 2) { gate.arrive(); gate.block(); if (fail) throw std::runtime_error("injected"); }
   };
-  MapRebuilder rebuilder({}, [&](auto, const RebuildStatus& status) {
-    std::lock_guard<std::mutex> lock(mutex); statuses.push_back(status); cv.notify_all();
-  }, hooks);
-  rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return statuses.size() == 1; })); }
-  const auto old = rebuilder.current();
-  rebuilder.requestRebuild(trajectory(2, {pose(2)}), archive({scan(2)}));
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return statuses.size() == 2; })); }
-  EXPECT_EQ(statuses.back().state, RebuildState::kFailed);
-  EXPECT_EQ(rebuilder.current(), old);
-  fail = false;
-  rebuilder.requestRebuild(trajectory(3, {pose(3)}), archive({scan(3)}));
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return statuses.size() == 3; })); }
-  EXPECT_EQ(rebuilder.current()->graph_revision, 3U);
-}
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
 
-TEST(MapRebuilder, RebuildSupersedesQueuedIncrementalsAndOldSnapshotsStayImmutable) {
-  Gate gate;
-  std::mutex mutex;
-  std::condition_variable cv;
-  std::vector<std::shared_ptr<const MapSnapshot>> snapshots;
-  MapRebuilderTestHooks hooks;
-  hooks.before_rebuild_scan = [&](std::uint64_t revision, std::uint64_t) {
-    if (revision == 2) { gate.arrive(); gate.block(); }
-  };
-  GridConfig config; config.resolution_m = 1.0;
-  MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus& status) {
-    if (status.state == RebuildState::kPublished) { std::lock_guard<std::mutex> lock(mutex); snapshots.push_back(snapshot); cv.notify_all(); }
-  }, hooks);
-  rebuilder.appendCommitted(scan(1), pose(1), 1);
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return snapshots.size() == 1; })); }
-  const auto old = snapshots.front();
-  rebuilder.requestRebuild(trajectory(2, {pose(1), pose(2)}), archive({scan(1), scan(2, 2.0)}));
+  rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.requestRebuild(trajectory(2, {pose(2)}), archive({scan(2)}));
   gate.wait();
   rebuilder.appendCommitted(scan(2, 2.0), pose(2), 2);
   gate.release();
-  std::unique_lock<std::mutex> lock(mutex);
-  ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return snapshots.size() == 2; }));
-  EXPECT_EQ(snapshots.back()->committed_scan_count, 2U);
-  EXPECT_EQ(old->committed_scan_count, 1U);
-  EXPECT_EQ(old->grid.cellAt(2, 0), -1);
-  EXPECT_FALSE(cv.wait_for(lock, 100ms, [&] { return snapshots.size() > 2; }));
+  ASSERT_TRUE(recorder.waitFor(5));
+  ASSERT_TRUE(recorder.saw(RebuildState::kFailed, 2));
+  fail = false;
+  rebuilder.requestRebuild(trajectory(3, {pose(1), pose(2)}), archive({scan(1), scan(2, 2.0)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(3));
+  EXPECT_EQ(rebuilder.current()->committed_scan_count, 2U);
 }
 
-TEST(MapRebuilder, CallbackMayCallCurrentAndDestructorStopsBlockedWorker) {
-  Gate gate;
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool callback_current{};
+TEST(MapRebuilder, FullRequestSuppressesInFlightRepresentedIncremental) {
+  Gate incremental_gate;
+  Recorder recorder;
   MapRebuilderTestHooks hooks;
-  hooks.before_rebuild_scan = [&](std::uint64_t, std::uint64_t) { gate.arrive(); gate.block(); };
-  MapRebuilder* raw = nullptr;
-  auto rebuilder = std::make_unique<MapRebuilder>(GridConfig{}, [&](auto snapshot, const RebuildStatus&) {
-    callback_current = snapshot && raw && raw->current() == snapshot;
-    std::lock_guard<std::mutex> lock(mutex); cv.notify_all();
-  }, hooks);
-  raw = rebuilder.get();
+  hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2) { incremental_gate.arrive(); incremental_gate.block(); }
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  rebuilder.appendCommitted(scan(2, 2.0), pose(2), 2);
+  incremental_gate.wait();
+  rebuilder.requestRebuild(trajectory(3, {pose(1), pose(2)}), archive({scan(1), scan(2, 2.0)}));
+  incremental_gate.release();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(3));
+  EXPECT_EQ(recorder.published(2), 0U);
+  EXPECT_EQ(rebuilder.current()->committed_scan_count, 2U);
+}
+
+TEST(MapRebuilder, InvalidArchiveOrTrajectoryIdsFailWithoutChangingCurrent) {
+  Recorder recorder;
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
+  rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  const auto current = rebuilder.current();
+  rebuilder.requestRebuild(trajectory(2, {pose(2), pose(2)}), archive({scan(2), scan(2)}));
+  ASSERT_TRUE(recorder.waitFor(5));
+  EXPECT_TRUE(recorder.saw(RebuildState::kFailed, 2));
+  EXPECT_EQ(rebuilder.current(), current);
+  rebuilder.requestRebuild(trajectory(3, {pose(3)}), archive({scan(4)}));
+  ASSERT_TRUE(recorder.waitFor(7));
+  EXPECT_TRUE(recorder.saw(RebuildState::kFailed, 3));
+  EXPECT_EQ(rebuilder.current(), current);
+}
+
+TEST(MapRebuilder, StaleGraphRequestsAndDuplicateIncrementsCannotReplaceNewerMap) {
+  Recorder recorder;
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
+  rebuilder.requestRebuild(trajectory(3, {pose(1)}), archive({scan(1)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(3));
+  rebuilder.requestRebuild(trajectory(2, {pose(2)}), archive({scan(2)}));
+  rebuilder.requestRebuild(trajectory(3, {pose(3)}), archive({scan(3)}));
+  rebuilder.appendCommitted(scan(1), pose(1), 3);
+  rebuilder.appendCommitted(scan(2), pose(2), 2);
+  rebuilder.requestRebuild(trajectory(4, {pose(4)}), archive({scan(4)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(4));
+  EXPECT_EQ(recorder.published(2), 0U);
+  EXPECT_EQ(recorder.published(3), 1U);
+  EXPECT_EQ(rebuilder.current()->graph_revision, 4U);
+}
+
+TEST(MapRebuilder, CallbackExceptionsAndCallbackDestructionLeaveWorkerSafe) {
+  Recorder recorder;
+  std::unique_ptr<MapRebuilder> rebuilder;
+  std::atomic<bool> destroyed{};
+  rebuilder = std::make_unique<MapRebuilder>(GridConfig{}, [&](auto snapshot, const RebuildStatus& status) {
+    recorder.record(snapshot, status);
+    if (status.state == RebuildState::kPublished && status.graph_revision == 1) {
+      EXPECT_EQ(rebuilder->current(), snapshot);
+      rebuilder.reset();
+      destroyed = true;
+      throw std::runtime_error("callback");
+    }
+  });
   rebuilder->requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
-  gate.wait();
-  gate.release();
-  { std::unique_lock<std::mutex> lock(mutex); ASSERT_TRUE(cv.wait_for(lock, 2s, [&] { return callback_current; })); }
-  rebuilder.reset();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  EXPECT_TRUE(destroyed.load());
+}
+
+TEST(MapRebuilder, ConstructorStressAndStatusFieldsAreConsistent) {
+  for (int i = 0; i != 100; ++i) {
+    Recorder recorder;
+    MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
+    rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
+    ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+    std::lock_guard<std::mutex> lock(recorder.mutex);
+    for (const RebuildStatus& status : recorder.statuses) {
+      if (status.state == RebuildState::kPublished) {
+        EXPECT_EQ(status.graph_revision, 1U);
+        EXPECT_EQ(status.input_scan_count, 1U);
+        EXPECT_EQ(status.committed_scan_count, 1U);
+        EXPECT_EQ(status.map_revision, 1U);
+      }
+    }
+  }
 }
 
 }  // namespace
