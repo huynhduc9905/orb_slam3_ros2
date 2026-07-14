@@ -45,6 +45,7 @@ struct MapRebuilderTestHooks {
   std::function<void(std::uint64_t graph_revision, std::uint64_t scan_id)> before_rebuild_scan;
   std::function<void(std::uint64_t graph_revision)> before_full_commit;
   std::function<void(std::uint64_t scan_id)> before_incremental_commit;
+  std::function<void()> worker_stopped;
 };
 
 class MapRebuilder {
