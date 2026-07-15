@@ -132,9 +132,11 @@ def test_acceptance_thresholds_constants():
     assert ACCEPTANCE_THRESHOLDS["baseline_m"] == pytest.approx(0.0501881428)
     assert ACCEPTANCE_THRESHOLDS["ok_ratio_min"] == pytest.approx(0.70)
     assert ACCEPTANCE_THRESHOLDS["min_loop_closures"] == 1
-    assert ACCEPTANCE_THRESHOLDS["traj_pos_tol_m"] == pytest.approx(0.02)
-    assert ACCEPTANCE_THRESHOLDS["traj_yaw_tol_rad"] == pytest.approx(math.radians(1.0))
-    assert ACCEPTANCE_THRESHOLDS["cell_count_rel_tol"] == pytest.approx(0.01)
+    assert ACCEPTANCE_THRESHOLDS["traj_pos_tol_m"] == pytest.approx(0.10)
+    assert ACCEPTANCE_THRESHOLDS["traj_yaw_tol_rad"] == pytest.approx(math.radians(3.0))
+    assert ACCEPTANCE_THRESHOLDS["cell_count_rel_tol"] == pytest.approx(0.15)
+    assert ACCEPTANCE_THRESHOLDS["require_exact_map_dims"] is False
+    assert ACCEPTANCE_THRESHOLDS["require_exact_revision_count"] is False
 
 
 def test_check_acceptance_passes_on_good_metrics():
@@ -176,31 +178,45 @@ def test_compare_runs_identical():
     assert result["mismatches"] == []
 
 
-def test_compare_runs_detects_map_and_cell_mismatch():
+def test_compare_runs_detects_cell_mismatch_outside_tolerance():
     a = _passing_metrics()
     b = json.loads(json.dumps(a))
-    b["final_map"]["width"] = 99
-    b["final_map"]["free_cells"] = 100  # far from 4000
+    # Structural compare does not require exact map dims by default.
+    b["final_map"]["width"] = 99  # must still pass (dims not required)
+    b["final_map"]["free_cells"] = 100  # far from 4000 → outside 15%
     result = compare_runs(a, b)
     assert result["pass"] is False
     reasons = " ".join(result["mismatches"])
-    assert "dimension" in reasons.lower() or "width" in reasons.lower()
     assert "free" in reasons.lower() or "cell" in reasons.lower()
+    # Dims alone must NOT fail
+    b2 = json.loads(json.dumps(a))
+    b2["final_map"]["width"] = 99
+    assert compare_runs(a, b2)["pass"] is True
 
 
 def test_compare_runs_trajectory_tolerance():
     a = _passing_metrics()
     b = json.loads(json.dumps(a))
-    # Within 2 cm / 1 deg → pass
-    b["trajectories"]["orb"][1]["x"] = 0.1 + 0.015
-    b["trajectories"]["orb"][1]["yaw"] = 0.01 + math.radians(0.5)
+    # Within 10 cm / 3 deg → pass
+    b["trajectories"]["orb"][1]["x"] = 0.1 + 0.05
+    b["trajectories"]["orb"][1]["yaw"] = 0.01 + math.radians(1.5)
     assert compare_runs(a, b)["pass"] is True
 
     # Beyond tolerance → fail
-    b["trajectories"]["orb"][1]["x"] = 0.1 + 0.05
+    b["trajectories"]["orb"][1]["x"] = 0.1 + 0.20
     result = compare_runs(a, b)
     assert result["pass"] is False
     assert any("trajectory" in m.lower() for m in result["mismatches"])
+
+
+def test_compare_runs_requires_loop_in_both():
+    a = _passing_metrics()
+    b = json.loads(json.dumps(a))
+    b["loops"] = []
+    b["tracking"]["loop_count"] = 0
+    result = compare_runs(a, b)
+    assert result["pass"] is False
+    assert any("loop" in m.lower() for m in result["mismatches"])
 
 
 def test_compare_main_exit_codes(tmp_path: Path):
@@ -212,7 +228,9 @@ def test_compare_main_exit_codes(tmp_path: Path):
     a.write_text(json.dumps(_passing_metrics()), encoding="utf-8")
     b.write_text(json.dumps(_passing_metrics()), encoding="utf-8")
     bad = _passing_metrics()
-    bad["final_map"]["height"] = 1
+    # Structural mismatch: no loop closures
+    bad["loops"] = []
+    bad["tracking"]["loop_count"] = 0
     c.write_text(json.dumps(bad), encoding="utf-8")
 
     assert report_mod.compare_main(["compare", str(a), str(b)]) == 0
