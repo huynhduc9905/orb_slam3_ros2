@@ -6,3 +6,5 @@ dist/
 artifacts/
 *.osa
 ORBvoc.txt
+__pycache__/
+*.pyc
