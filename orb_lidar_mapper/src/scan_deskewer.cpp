@@ -62,7 +62,12 @@ std::optional<std::vector<Ray2>> ScanDeskewer::deskew(
     }
     const auto relative_wheel = wheels.relative(scan.stamp_ns, *stamp_ns);
     if (!relative_wheel) {
-      return std::nullopt;
+      // A single ray whose timestamp cannot be bracketed by wheel odometry
+      // within the configured gap (e.g. the sweep tail outruns the wheel
+      // buffer during live replay) must not discard the whole scan. Skip only
+      // the un-interpolatable ray, exactly as NaN/out-of-range beams are
+      // skipped above; the remaining well-covered rays still build the map.
+      continue;
     }
 
     const Pose2 lidar_pose = committed_scan_base_pose * *relative_wheel * base_to_lidar;

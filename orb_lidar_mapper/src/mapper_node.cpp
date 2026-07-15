@@ -316,6 +316,7 @@ void MapperNode::onTrackingEvent(orb_slam3_msgs::msg::TrackingEvent::ConstShared
 // ─────────────────────────────────────────────────────────────────────────────
 
 void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
+  ++scans_received_;
   const int64_t stamp_ns = toNs(msg->header.stamp);
   const std::string scan_frame = msg->header.frame_id;
 
@@ -363,9 +364,17 @@ void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
 
   std::lock_guard<std::mutex> lock(mutex_);
 
+  // Distinguish the two placeScan failure modes for diagnostics.
+  const bool have_wheel = wheel_buf_->interpolate(stamp_ns).has_value();
+
   // Place scan in trajectory store
   const auto placement = traj_->placeScan(stamp_ns);
   if (!placement.has_value()) {
+    if (!have_wheel) {
+      ++scans_no_wheel_;
+    } else {
+      ++scans_no_anchor_;
+    }
     return;
   }
   const ScanPose scan_pose = *placement;
@@ -390,9 +399,11 @@ void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
       rebuilder_->appendCommitted(archived, scan_pose, last_graph_revision_);
       committed_scan_ids_.insert(scan_pose.scan_id);
     }
+    ++scans_committed_;
     publishCommittedScanMarker(local_rays, scan_pose.pose, stamp_ns);
   } else {
     // Provisional (lost or not yet committed).
+    ++scans_provisional_;
     publishProvisionalScanMarker(local_rays, scan_pose.pose, stamp_ns);
   }
 }
@@ -555,6 +566,11 @@ void MapperNode::publishDiagnostics(const std::string& level, const std::string&
   add_kv("tf_lookup_failures", tf_lookup_failures_.load());
   add_kv("wheel_interp_failures", wheel_interp_failures_.load());
   add_kv("planarity_rejections", planarity_rejections_.load());
+  add_kv("scans_received", scans_received_.load());
+  add_kv("scans_no_wheel", scans_no_wheel_.load());
+  add_kv("scans_no_anchor", scans_no_anchor_.load());
+  add_kv("scans_committed", scans_committed_.load());
+  add_kv("scans_provisional", scans_provisional_.load());
 
   array.status.push_back(status);
   diagnostics_pub_->publish(array);

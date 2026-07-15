@@ -89,6 +89,12 @@ private:
   std::atomic<uint64_t> tf_lookup_failures_{0};
   std::atomic<uint64_t> wheel_interp_failures_{0};
   std::atomic<uint64_t> planarity_rejections_{0};
+  // Scan-pipeline instrumentation (diagnosing low commit rate)
+  std::atomic<uint64_t> scans_received_{0};
+  std::atomic<uint64_t> scans_no_wheel_{0};
+  std::atomic<uint64_t> scans_no_anchor_{0};
+  std::atomic<uint64_t> scans_committed_{0};
+  std::atomic<uint64_t> scans_provisional_{0};
 
   // Wheel path accumulation (guarded by mutex_)
   std::vector<geometry_msgs::msg::PoseStamped> wheel_poses_;

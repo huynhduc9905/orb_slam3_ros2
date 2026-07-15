@@ -59,7 +59,12 @@ TEST(ScanDeskewer, UsesEachRayTimestampAndRotatesAroundBaseCenter) {
   EXPECT_NEAR((*rays)[1].end.y, 1.26, 1e-9);
 }
 
-TEST(ScanDeskewer, RejectsEntireScanWhenAnyRayWheelInterpolationIsUnavailable) {
+TEST(ScanDeskewer, SkipsRaysWithoutWheelInterpolationButKeepsCoveredRays) {
+  // Ray 0 at t=0 is covered by the wheel buffer; ray 1 at t=200ms exceeds the
+  // 100ms gap and cannot be interpolated. The scan must NOT be discarded — the
+  // covered ray is kept and only the stale ray is skipped. (Real lidar scans
+  // sweep ~99ms, so the sweep tail routinely outruns the live wheel buffer;
+  // rejecting the whole scan starves the map of nearly all data.)
   ScanValue scan = oneRay(0, 0.0F, 1.0F);
   scan.time_increment = 0.2F;
   scan.ranges.push_back(1.0F);
@@ -67,7 +72,10 @@ TEST(ScanDeskewer, RejectsEntireScanWhenAnyRayWheelInterpolationIsUnavailable) {
   ASSERT_TRUE(wheels.push({0, Pose2{}}));
   ASSERT_TRUE(wheels.push({200'000'000, Pose2{}}));
 
-  EXPECT_FALSE(ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels).has_value());
+  const auto rays = ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels);
+  ASSERT_TRUE(rays.has_value());
+  ASSERT_EQ(rays->size(), 1U) << "covered ray 0 kept, stale ray 1 skipped";
+  EXPECT_NEAR(rays->front().end.x, 1.0, 1e-9);
 }
 
 TEST(ScanDeskewer, RejectsTimestampArithmeticOverflow) {
@@ -96,15 +104,19 @@ TEST(ScanDeskewer, SkipsInvalidBeamBeforeItsStaleInterpolation) {
   EXPECT_NEAR(rays->front().end.x, 1.0, 1e-9);
 }
 
-TEST(ScanDeskewer, RejectsScanWhenAValidBeamHasStaleInterpolation) {
+TEST(ScanDeskewer, ReturnsEmptyWhenEveryRayHasStaleInterpolation) {
+  // If NO ray can be interpolated, deskew yields an empty ray set (the caller
+  // treats an empty result as "nothing to map from this scan"); it still does
+  // not return nullopt, reserving that for malformed scan fields / overflow.
   ScanValue scan = oneRay(0, 0.0F, 1.0F);
-  scan.time_increment = 0.2F;
-  scan.ranges.push_back(1.0F);
+  scan.time_increment = 0.2F;          // single ray at t=0
   TimedPoseBuffer wheels(1'000'000'000LL, 100'000'000LL);
-  ASSERT_TRUE(wheels.push({0, Pose2{}}));
-  ASSERT_TRUE(wheels.push({200'000'000, Pose2{}}));
+  ASSERT_TRUE(wheels.push({300'000'000, Pose2{}}));
+  ASSERT_TRUE(wheels.push({500'000'000, Pose2{}}));  // buffer starts after the ray
 
-  EXPECT_FALSE(ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels).has_value());
+  const auto rays = ScanDeskewer::deskew(scan, Pose2{}, Pose2{}, wheels);
+  ASSERT_TRUE(rays.has_value());
+  EXPECT_TRUE(rays->empty());
 }
 
 TEST(ScanDeskewer, RepresentsInfinityAsFiniteRangeMaxClearingRay) {
