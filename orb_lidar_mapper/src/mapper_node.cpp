@@ -1,5 +1,6 @@
 #include "orb_lidar_mapper/mapper_node.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -188,13 +189,19 @@ void MapperNode::onTrackedFrame(orb_slam3_msgs::msg::TrackedFrame::ConstSharedPt
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Populate wheel_pose by interpolating the mirror buffer at the frame timestamp.
+  // Identity default would poison the anchor (map_pose * I^{-1} * scan_wheel).
   const auto wheel_at_frame = wheel_buf_->interpolate(stamp_ns);
-  if (wheel_at_frame) {
-    anchor.wheel_pose = *wheel_at_frame;
+  if (!wheel_at_frame) {
+    ++wheel_interp_failures_;
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "wheel interpolation failed at tracked-frame stamp %ld ns; skipping anchor",
+        static_cast<long>(stamp_ns));
+    publishDiagnostics("WARN", "tracked frame skipped: wheel interpolation failed");
+    return;
   }
-
+  anchor.wheel_pose = *wheel_at_frame;
   traj_->addTrackedFrame(anchor);
-  tracking_ok_ = (state == TrackingState::kOk);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +256,22 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     if (common_ids.count(sp.scan_id)) filtered_traj->scans.push_back(sp);
   }
 
+  // Count committed scans in the filtered trajectory (rebuild needs at least one).
+  std::size_t committed_in_traj = 0;
+  for (const auto& sp : filtered_traj->scans) {
+    if (sp.committed) ++committed_in_traj;
+  }
+
+  // Disconnected atlas or empty committed set: freeze last good map.
+  // Still update corrected path; do not rebuild or append into the live grid.
+  if (!snap.active_map_connected || committed_in_traj == 0 || filtered_arc->scans.empty()) {
+    publishCorrectedPath(revision);
+    if (!snap.active_map_connected) {
+      publishDiagnostics("WARN", "graph snapshot disconnected: keeping last published map frozen");
+    }
+    return;
+  }
+
   // Feed newly-committed scans incrementally as well.
   for (const auto& sp : filtered_traj->scans) {
     if (sp.committed && committed_scan_ids_.find(sp.scan_id) == committed_scan_ids_.end()) {
@@ -262,10 +285,7 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     }
   }
 
-  // Only request a full rebuild when there is at least one scan to rebuild.
-  if (!filtered_arc->scans.empty()) {
-    rebuilder_->requestRebuild(filtered_traj, filtered_arc);
-  }
+  rebuilder_->requestRebuild(filtered_traj, filtered_arc);
 
   publishCorrectedPath(revision);
 
@@ -299,14 +319,13 @@ void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
   const int64_t stamp_ns = toNs(msg->header.stamp);
   const std::string scan_frame = msg->header.frame_id;
 
-  // TF lookup: base_link -> scan frame.
-  // Use tf2::TimePointZero to get latest available transform — correct for
-  // static TFs which are valid at all times.
+  // TF lookup at the scan stamp (not latest) so dynamic mounts stay consistent.
+  // Static TFs remain valid at any stamp, so tests with a static broadcaster still resolve.
   Pose2 base_to_lidar;
   try {
+    const rclcpp::Time scan_stamp(msg->header.stamp);
     const auto tf = tf_buffer_->lookupTransform(
-        base_frame_, scan_frame,
-        tf2::TimePointZero);
+        base_frame_, scan_frame, scan_stamp);
 
     const double roll = std::atan2(
         2.0 * (tf.transform.rotation.w * tf.transform.rotation.x +
@@ -320,6 +339,7 @@ void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
     const double max_rp = max_roll_pitch_deg_ * M_PI / 180.0;
     const double height = std::abs(tf.transform.translation.z);
     if (std::abs(roll) > max_rp || std::abs(pitch) > max_rp || height > max_height_delta_m_) {
+      ++planarity_rejections_;
       publishDiagnostics("WARN", "scan rejected: non-planar TF base_link->" + scan_frame);
       return;
     }
@@ -520,6 +540,17 @@ void MapperNode::publishDiagnostics(const std::string& level, const std::string&
   status.name    = get_name();
   status.message = message;
   status.level   = (level == "ERROR") ? 2 : (level == "WARN") ? 1 : 0;
+
+  auto add_kv = [&status](const std::string& key, uint64_t value) {
+    diagnostic_msgs::msg::KeyValue kv;
+    kv.key = key;
+    kv.value = std::to_string(value);
+    status.values.push_back(kv);
+  };
+  add_kv("tf_lookup_failures", tf_lookup_failures_.load());
+  add_kv("wheel_interp_failures", wheel_interp_failures_.load());
+  add_kv("planarity_rejections", planarity_rejections_.load());
+
   array.status.push_back(status);
   diagnostics_pub_->publish(array);
 }

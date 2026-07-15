@@ -45,7 +45,6 @@ private:
   void onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg);
 
   // ── Internal helpers ───────────────────────────────────────────────────────
-  void publishWheelPath();
   void publishCommittedScanMarker(const std::vector<Ray2>& rays, const Pose2& pose, int64_t stamp_ns);
   void publishProvisionalScanMarker(const std::vector<Ray2>& rays, const Pose2& pose, int64_t stamp_ns);
   void deleteProvisionalMarkers();
@@ -83,12 +82,13 @@ private:
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // Tracking state
-  bool tracking_ok_{false};
   bool was_lost_{false};       // true while we are in a LOST interval
   uint64_t last_graph_revision_{0};
 
   // Diagnostic counters
   std::atomic<uint64_t> tf_lookup_failures_{0};
+  std::atomic<uint64_t> wheel_interp_failures_{0};
+  std::atomic<uint64_t> planarity_rejections_{0};
 
   // Wheel path accumulation (guarded by mutex_)
   std::vector<geometry_msgs::msg::PoseStamped> wheel_poses_;

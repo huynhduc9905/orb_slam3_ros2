@@ -341,12 +341,29 @@ TEST_F(MapperNodeTest, LostTrackingFreezesMapAndShowsProvisionalScanMarker) {
       << "Map revision advanced while LOST";
 }
 
+// World-x of the rightmost occupied cell (cell index → world via origin/resolution).
+std::optional<double> maxOccupiedWorldX(const nav_msgs::msg::OccupancyGrid& grid) {
+  std::optional<double> max_x;
+  const double res = grid.info.resolution;
+  const double ox = grid.info.origin.position.x;
+  const uint32_t w = grid.info.width;
+  for (std::size_t i = 0; i < grid.data.size(); ++i) {
+    if (grid.data[i] <= 50) continue;
+    const uint32_t cx = static_cast<uint32_t>(i % w);
+    const double wx = ox + (static_cast<double>(cx) + 0.5) * res;
+    if (!max_x || wx > *max_x) max_x = wx;
+  }
+  return max_x;
+}
+
 // ---------------------------------------------------------------------------
-// Test 3: RELOCALIZED + corrected graph → map revision advances, cells present
+// Test 3: RELOCALIZED + corrected graph → map revision advances AND occupied
+// hit endpoint moves by approximately the keyframe correction (~1.0 m).
 // ---------------------------------------------------------------------------
 TEST_F(MapperNodeTest, RelocalizationTriggersRebuildAndMapRevision2) {
   const uint64_t rev1 = graph_rev_base_ + 1u;
   const uint64_t rev2 = graph_rev_base_ + 2u;
+  constexpr double kCorrectionM = 1.0;
 
   // ── baseline rev 1 ───────────────────────────────────────────────────────
   publishWheelBurst(0, 5);
@@ -368,31 +385,32 @@ TEST_F(MapperNodeTest, RelocalizationTriggersRebuildAndMapRevision2) {
   ASSERT_TRUE(got_rev1) << "Timed out waiting for map revision 1";
   const uint64_t map_rev1 = last_map_revision_->map_revision;
 
-  // ── LOST ─────────────────────────────────────────────────────────────────
+  ASSERT_NE(last_map_, nullptr);
+  const auto occ_x_rev1 = maxOccupiedWorldX(*last_map_);
+  ASSERT_TRUE(occ_x_rev1.has_value()) << "No occupied cells after revision 1";
+
+  // ── LOST (no extra scans — recovery proof is rebuild of the baseline scan) ─
   event_pub_->publish(make_event(3, orb_slam3_msgs::msg::TrackingEvent::LOST, rev1));
   tracked_pub_->publish(make_tracked(3, orb_slam3_msgs::msg::TrackedFrame::LOST,
                                      false, 0.0, 1, 1, rev1));
   spinFlush(mapper_, helper_, 200ms);
-  publishWheelBurst(3, 7, 0.1);
-  spinFlush(mapper_, helper_, 100ms);
-  scan_pub_->publish(make_scan(4, 2.5f));
-  spinFlush(mapper_, helper_, 200ms);
 
-  // ── RELOCALIZED ──────────────────────────────────────────────────────────
+  // ── RELOCALIZED + corrected graph (keyframe +1.0 m) ──────────────────────
   event_pub_->publish(make_event(8, orb_slam3_msgs::msg::TrackingEvent::RELOCALIZED, rev2));
   spinFlush(mapper_, helper_, 100ms);
 
-  publishWheelBurst(8, 12, 0.1);
+  // Wheel samples so the post-reloc tracked frame can interpolate (no identity poison).
+  publishWheelBurst(8, 10, 0.1);
   spinFlush(mapper_, helper_, 100ms);
 
   tracked_pub_->publish(make_tracked(9, orb_slam3_msgs::msg::TrackedFrame::OK,
-                                     true, 1.0, 1, 1, rev2));
+                                     true, kCorrectionM, 1, 1, rev2));
   spinFlush(mapper_, helper_, 200ms);
 
-  graph_pub_->publish(make_graph(9, rev2, 1, 1.0));
-  spinFlush(mapper_, helper_, 300ms);
-
-  scan_pub_->publish(make_scan(10, 2.0f));
+  // Corrected keyframe shifted by ~1.0 m — rebuild must move the same occupied hit.
+  // Do not publish a new scan: the recovery proof is the archived scan re-inserted
+  // at the corrected pose, not incremental append of a later scan.
+  graph_pub_->publish(make_graph(9, rev2, 1, kCorrectionM));
 
   bool got_rev2 = spinUntil2(mapper_, helper_,
     [this, map_rev1] {
@@ -404,15 +422,75 @@ TEST_F(MapperNodeTest, RelocalizationTriggersRebuildAndMapRevision2) {
   EXPECT_GE(last_map_revision_->committed_scan_count, 1u);
 
   ASSERT_NE(last_map_, nullptr);
-  bool has_occ = false;
-  for (int8_t c : last_map_->data) {
-    if (c > 50) { has_occ = true; break; }
-  }
-  EXPECT_TRUE(has_occ) << "Map has no occupied cells after rebuild";
+  const auto occ_x_rev2 = maxOccupiedWorldX(*last_map_);
+  ASSERT_TRUE(occ_x_rev2.has_value()) << "Map has no occupied cells after rebuild";
+
+  // Core recovery proof: rightmost occupied hit moved by ~correction amount.
+  // Allow a few cells of tolerance (resolution 0.05 → ~0.25 m = 5 cells).
+  const double dx = *occ_x_rev2 - *occ_x_rev1;
+  EXPECT_NEAR(dx, kCorrectionM, 0.25)
+      << "occupied max-x should move by ~" << kCorrectionM
+      << " m (rev1 x=" << *occ_x_rev1 << " rev2 x=" << *occ_x_rev2 << ")";
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: map and map_revision publishers are reliable transient-local
+// Test 4: disconnected atlas must not wipe the last published map
+// ---------------------------------------------------------------------------
+TEST_F(MapperNodeTest, DisconnectedAtlasKeepsLastPublishedMap) {
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+  const uint64_t rev2 = graph_rev_base_ + 2u;
+
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, rev1));
+  spinFlush(mapper_, helper_, 200ms);
+  graph_pub_->publish(make_graph(2, rev1, 1, 0.0));
+  spinFlush(mapper_, helper_, 300ms);
+
+  const std::size_t rev_count_before = map_rev_count_;
+  scan_pub_->publish(make_scan(2, 2.0f));
+  bool got_base = spinUntil2(mapper_, helper_,
+    [this, rev_count_before] {
+      return map_rev_count_ > rev_count_before &&
+             last_map_revision_ &&
+             last_map_revision_->committed_scan_count >= 1u;
+    });
+  ASSERT_TRUE(got_base) << "Baseline map not received";
+  ASSERT_NE(last_map_, nullptr);
+
+  // Let the rebuilder settle (PUBLISHED → IDLE may still emit a status).
+  spinFlush(mapper_, helper_, 400ms);
+
+  const uint64_t frozen_map_rev = last_map_revision_->map_revision;
+  const auto frozen_map = last_map_;
+  const auto frozen_data = last_map_->data;
+  const uint32_t frozen_w = last_map_->info.width;
+  const uint32_t frozen_h = last_map_->info.height;
+  const std::size_t rev_count_at_freeze = map_rev_count_;
+
+  // Newer graph snapshot with disconnected active map — must freeze last good map.
+  auto disconnected = make_graph(3, rev2, 1, 0.0);
+  disconnected.active_map_connected = false;
+  graph_pub_->publish(disconnected);
+  spinFlush(mapper_, helper_, 800ms);
+
+  // No new map_revision message after freeze (allow residual IDLE already counted).
+  EXPECT_EQ(map_rev_count_, rev_count_at_freeze)
+      << "Map revision message published after disconnected snapshot";
+  ASSERT_NE(last_map_revision_, nullptr);
+  EXPECT_EQ(last_map_revision_->map_revision, frozen_map_rev)
+      << "Map revision advanced after disconnected snapshot";
+  ASSERT_NE(last_map_, nullptr);
+  EXPECT_EQ(last_map_->data, frozen_data)
+      << "Map grid data changed after disconnected snapshot";
+  EXPECT_EQ(last_map_->info.width, frozen_w);
+  EXPECT_EQ(last_map_->info.height, frozen_h);
+  (void)frozen_map;
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: map and map_revision publishers are reliable transient-local
 // ---------------------------------------------------------------------------
 TEST_F(MapperNodeTest, MapTopicsAreReliableTransientLocal) {
   const auto map_i = mapper_->get_publishers_info_by_topic("/orb_lidar/map");
@@ -428,7 +506,7 @@ TEST_F(MapperNodeTest, MapTopicsAreReliableTransientLocal) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: No canonical /map or /tf publisher
+// Test 6: No canonical /map or /tf publisher
 // ---------------------------------------------------------------------------
 TEST_F(MapperNodeTest, NoCanonicalMapTopicOrMapOdomTfPublished) {
   EXPECT_TRUE(mapper_->get_publishers_info_by_topic("/map").empty())
@@ -438,14 +516,22 @@ TEST_F(MapperNodeTest, NoCanonicalMapTopicOrMapOdomTfPublished) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Default parameters
+// Test 7: Default parameters
 // ---------------------------------------------------------------------------
 TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   EXPECT_EQ(mapper_->get_parameter("odom_topic").as_string(),    "/odom_wheel");
   EXPECT_EQ(mapper_->get_parameter("scan_topic").as_string(),    "/scan_origin");
+  EXPECT_EQ(mapper_->get_parameter("tracked_frame_topic").as_string(),
+            "/orb_slam3/tracked_frame");
+  EXPECT_EQ(mapper_->get_parameter("graph_snapshot_topic").as_string(),
+            "/orb_slam3/graph_snapshot");
+  EXPECT_EQ(mapper_->get_parameter("tracking_event_topic").as_string(),
+            "/orb_slam3/events");
+  EXPECT_EQ(mapper_->get_parameter("map_topic").as_string(),     "/orb_lidar/map");
   EXPECT_EQ(mapper_->get_parameter("map_frame").as_string(),     "orb_map");
   EXPECT_EQ(mapper_->get_parameter("base_frame").as_string(),    "base_link");
   EXPECT_NEAR(mapper_->get_parameter("wheel_retention_s").as_double(),  300.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       12.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("max_roll_pitch_deg").as_double(),   10.0, 1e-9);
