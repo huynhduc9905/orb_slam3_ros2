@@ -18,7 +18,6 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    EmitEvent,
     ExecuteProcess,
     LogInfo,
     OpaqueFunction,
@@ -368,7 +367,7 @@ def _setup(context, *args, **kwargs):
                 target_action=bag_play,
                 on_exit=[
                     LogInfo(msg="[bag_replay] bag playback exited; shutting down"),
-                    EmitEvent(event=Shutdown(reason="bag playback finished")),
+                    Shutdown(reason="bag playback finished"),
                 ],
             )
         )

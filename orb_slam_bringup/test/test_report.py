@@ -327,3 +327,26 @@ def test_compare_runs_non_overlapping_timestamps_fails():
     result = compare_runs(a, b)
     assert result["pass"] is False
     assert any("trajectory" in m.lower() for m in result["mismatches"])
+
+
+def test_camera_baseline_full_precision_passes_gate():
+    """Profile baseline 0.05018814280629158 must match expected 0.0501881428.
+
+    Diff is ~6e-12; gate must use absolute tolerance (not exact equality).
+    """
+    m = _passing_metrics()
+    m["stereo"]["baseline_m"] = 0.05018814280629158
+    m["stereo"]["camera_validated"] = True
+    result = check_acceptance(m)
+    cam_gate = next(g for g in result["gates"] if g["name"] == "camera_validated")
+    assert cam_gate["pass"] is True, cam_gate
+    # Overall still passes when only baseline precision differs
+    assert result["pass"] is True
+
+
+def test_camera_baseline_far_mismatch_fails_gate():
+    m = _passing_metrics()
+    m["stereo"]["baseline_m"] = 0.10  # clearly wrong
+    result = check_acceptance(m)
+    cam_gate = next(g for g in result["gates"] if g["name"] == "camera_validated")
+    assert cam_gate["pass"] is False

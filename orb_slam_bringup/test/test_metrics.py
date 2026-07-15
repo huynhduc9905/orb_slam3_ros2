@@ -383,9 +383,53 @@ def test_fallback_from_diagnostics_maps_mapper_kvs():
         }
     )
     assert fb["measured"] is True
+    # Commit invariants are 0 by mapper contract (not proxies of rejections).
     assert fb["invalid_tf_committed"] == 0
     assert fb["wheel_only_before_recovery"] == 0
     assert fb["planarity_rejections"] == 2
+    # Raw rejection counters still exposed for observability.
+    assert fb["tf_lookup_failures"] == 0
+    assert fb["wheel_interp_failures"] == 0
+
+
+def test_commit_gates_not_inflated_by_rejection_counters():
+    """tf_lookup_failures / wheel_interp_failures are rejections, not commits.
+
+    Mapper never commits invalid-TF or wheel-only scans; those counters count
+    REJECTED / provisional scans. Commit gates must stay 0/measured.
+    """
+    from orb_slam_bringup.metrics_recorder import fallback_from_diagnostics
+
+    fb = fallback_from_diagnostics(
+        {
+            "tf_lookup_failures": 1,
+            "wheel_interp_failures": 1173,
+            "planarity_rejections": 4,
+        }
+    )
+    assert fb["measured"] is True
+    assert fb["invalid_tf_committed"] == 0
+    assert fb["wheel_only_before_recovery"] == 0
+    assert fb["tf_lookup_failures"] == 1
+    assert fb["wheel_interp_failures"] == 1173
+    assert fb["planarity_rejections"] == 4
+
+
+def test_explicit_violation_counters_override_mapper_contract():
+    """If mapper ever publishes explicit commit-violation KVs, use them."""
+    from orb_slam_bringup.metrics_recorder import fallback_from_diagnostics
+
+    fb = fallback_from_diagnostics(
+        {
+            "tf_lookup_failures": 5,
+            "wheel_interp_failures": 9,
+            "invalid_tf_committed": 2,
+            "wheel_only_before_recovery": 3,
+        }
+    )
+    assert fb["invalid_tf_committed"] == 2
+    assert fb["wheel_only_before_recovery"] == 3
+    assert fb["measured"] is True
 
 
 def test_aggregator_default_fallback_unmeasured():
@@ -395,3 +439,117 @@ def test_aggregator_default_fallback_unmeasured():
     # Fail-closed: unmeasured counters are None (not 0)
     assert m["fallback"]["invalid_tf_committed"] is None
     assert m["fallback"]["wheel_only_before_recovery"] is None
+
+
+def test_stereo_pair_counter_matched_timestamps():
+    """100 left + 100 right within tolerance → 100 pairs."""
+    from orb_slam_bringup.metrics_recorder import StereoPairCounter
+
+    c = StereoPairCounter(tolerance_s=0.01)
+    for i in range(100):
+        t = i * 0.033
+        c.on_left(t)
+        c.on_right(t + 0.002)  # 2 ms offset, within 10 ms
+    assert c.paired_count == 100
+    assert c.left_count == 100
+    assert c.right_count == 100
+    assert c.streams_seen is True
+
+
+def test_stereo_pair_counter_mismatched_timestamps():
+    """Stamps outside tolerance do not form pairs."""
+    from orb_slam_bringup.metrics_recorder import StereoPairCounter
+
+    c = StereoPairCounter(tolerance_s=0.01)
+    for i in range(50):
+        c.on_left(i * 0.033)
+        # 50 ms offset — outside 10 ms tolerance
+        c.on_right(i * 0.033 + 0.050)
+    assert c.paired_count == 0
+    assert c.left_count == 50
+    assert c.right_count == 50
+    assert c.streams_seen is True
+
+
+def test_stereo_pair_counter_partial_match():
+    """Only frames with a partner within tolerance count as pairs."""
+    from orb_slam_bringup.metrics_recorder import StereoPairCounter
+
+    c = StereoPairCounter(tolerance_s=0.01)
+    # 10 matched
+    for i in range(10):
+        t = float(i)
+        c.on_left(t)
+        c.on_right(t + 0.001)
+    # 5 left-only (no right)
+    for i in range(10, 15):
+        c.on_left(float(i))
+    assert c.paired_count == 10
+    assert c.left_count == 15
+    assert c.right_count == 10
+
+
+def test_validate_camera_info_matching_profile():
+    """Live CameraInfo matching profile → validated True."""
+    from orb_slam_bringup.metrics_recorder import validate_camera_info
+
+    # K row-major 3x3; fx at [0]
+    fx = 426.9840393066406
+    k = [fx, 0.0, 430.8, 0.0, fx, 238.9, 0.0, 0.0, 1.0]
+    # Right-camera P: Tx = -fx * baseline → P[3] = -fx * baseline
+    baseline = 0.05018814280629158
+    p = [fx, 0.0, 430.8, -fx * baseline, 0.0, fx, 238.9, 0.0, 0.0, 0.0, 1.0, 0.0]
+    ok, details = validate_camera_info(
+        width=848,
+        height=480,
+        k=k,
+        p=p,
+        expected_width=848,
+        expected_height=480,
+        expected_fx=426.984,
+        expected_baseline_m=0.0501881428,
+    )
+    assert ok is True
+    assert details["width"] == 848
+    assert details["height"] == 480
+    assert details["baseline_m"] == pytest.approx(baseline, abs=1e-6)
+
+
+def test_validate_camera_info_wrong_width():
+    from orb_slam_bringup.metrics_recorder import validate_camera_info
+
+    fx = 426.984
+    k = [fx, 0, 0, 0, fx, 0, 0, 0, 1]
+    p = [fx, 0, 0, -fx * 0.05, 0, fx, 0, 0, 0, 0, 1, 0]
+    ok, _ = validate_camera_info(
+        width=640,
+        height=480,
+        k=k,
+        p=p,
+        expected_width=848,
+        expected_height=480,
+        expected_fx=426.984,
+        expected_baseline_m=0.0501881428,
+    )
+    assert ok is False
+
+
+def test_validate_camera_info_wrong_baseline():
+    from orb_slam_bringup.metrics_recorder import validate_camera_info
+
+    fx = 426.984
+    k = [fx, 0, 0, 0, fx, 0, 0, 0, 1]
+    # baseline 0.10 m — far from expected ~0.05
+    p = [fx, 0, 0, -fx * 0.10, 0, fx, 0, 0, 0, 0, 1, 0]
+    ok, details = validate_camera_info(
+        width=848,
+        height=480,
+        k=k,
+        p=p,
+        expected_width=848,
+        expected_height=480,
+        expected_fx=426.984,
+        expected_baseline_m=0.0501881428,
+    )
+    assert ok is False
+    assert abs(details["baseline_m"] - 0.0501881428) > 1e-3

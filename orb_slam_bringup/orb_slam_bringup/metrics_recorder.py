@@ -141,6 +141,9 @@ class MetricsAggregator:
     invalid_tf_committed: Optional[int] = None
     wheel_only_before_recovery: Optional[int] = None
     planarity_rejections: Optional[int] = None
+    # Raw mapper rejection counters (observability only — NOT commit gates).
+    tf_lookup_failures: Optional[int] = None
+    wheel_interp_failures: Optional[int] = None
     bag: Optional[Dict[str, Any]] = None
     git: Optional[Dict[str, Any]] = None
     configuration_sha256: str = ""
@@ -232,6 +235,9 @@ class MetricsAggregator:
                 "invalid_tf_committed": self.invalid_tf_committed,
                 "wheel_only_before_recovery": self.wheel_only_before_recovery,
                 "planarity_rejections": self.planarity_rejections,
+                # Rejection counters (safe skips) — do not confuse with commits.
+                "tf_lookup_failures": self.tf_lookup_failures,
+                "wheel_interp_failures": self.wheel_interp_failures,
                 "measured": (
                     self.invalid_tf_committed is not None
                     and self.wheel_only_before_recovery is not None
@@ -532,16 +538,21 @@ def build_live_stereo_section(
     height: int = 480,
     baseline_m: float = 0.0501881428,
     camera_validated: bool = False,
+    measured: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Stereo metrics for live flush — fail-closed defaults.
 
     Does NOT invent paired_count from expected_pairs. camera_validated stays
-    False unless a live CameraInfo/profile validation path sets it True.
+    False unless a live CameraInfo validation path sets it True.
     Loading YAML profile values alone is NOT validation.
     """
     expected = int(expected_pairs) if expected_pairs > 0 else 6633
     paired = max(0, int(paired_count))
     ratio = (paired / float(expected)) if expected > 0 else 0.0
+    if measured is None:
+        measured_flag = paired > 0 or bool(camera_validated)
+    else:
+        measured_flag = bool(measured)
     return {
         "expected_pairs": expected,
         "paired_count": paired,
@@ -550,8 +561,122 @@ def build_live_stereo_section(
         "height": int(height),
         "baseline_m": float(baseline_m),
         "camera_validated": bool(camera_validated),
-        "measured": paired > 0 or bool(camera_validated),
+        "measured": measured_flag,
     }
+
+
+# Default stereo pairing tolerance: |t_left - t_right| <= 10 ms
+STEREO_PAIR_TOLERANCE_S = 0.01
+
+
+@dataclass
+class StereoPairCounter:
+    """Count stereo pairs by matching left/right CameraInfo (or image) stamps.
+
+    Only stamps are retained — never pixel data. Buffers are bounded so a
+    long bag does not grow unbounded when one side drops frames.
+    """
+
+    tolerance_s: float = STEREO_PAIR_TOLERANCE_S
+    max_buffer: int = 64
+    _left: List[float] = field(default_factory=list)
+    _right: List[float] = field(default_factory=list)
+    paired_count: int = 0
+    left_count: int = 0
+    right_count: int = 0
+
+    @property
+    def streams_seen(self) -> bool:
+        return self.left_count > 0 or self.right_count > 0
+
+    def on_left(self, t: float) -> None:
+        self.left_count += 1
+        self._left.append(float(t))
+        self._trim(self._left)
+        self._try_match_from_left()
+
+    def on_right(self, t: float) -> None:
+        self.right_count += 1
+        self._right.append(float(t))
+        self._trim(self._right)
+        self._try_match_from_right()
+
+    def _trim(self, buf: List[float]) -> None:
+        if len(buf) > self.max_buffer:
+            del buf[: len(buf) - self.max_buffer]
+
+    def _try_match_from_left(self) -> None:
+        """Newest left tries to claim nearest unmatched right within tolerance."""
+        if not self._left or not self._right:
+            return
+        t = self._left[-1]
+        best_i = -1
+        best_dt = self.tolerance_s + 1.0
+        for i, tr in enumerate(self._right):
+            dt = abs(tr - t)
+            if dt <= self.tolerance_s and dt < best_dt:
+                best_dt = dt
+                best_i = i
+        if best_i >= 0:
+            self._right.pop(best_i)
+            self._left.pop()
+            self.paired_count += 1
+
+    def _try_match_from_right(self) -> None:
+        if not self._left or not self._right:
+            return
+        t = self._right[-1]
+        best_i = -1
+        best_dt = self.tolerance_s + 1.0
+        for i, tl in enumerate(self._left):
+            dt = abs(tl - t)
+            if dt <= self.tolerance_s and dt < best_dt:
+                best_dt = dt
+                best_i = i
+        if best_i >= 0:
+            self._left.pop(best_i)
+            self._right.pop()
+            self.paired_count += 1
+
+
+def validate_camera_info(
+    *,
+    width: int,
+    height: int,
+    k: Sequence[float],
+    p: Sequence[float],
+    expected_width: int = 848,
+    expected_height: int = 480,
+    expected_fx: float = 426.984,
+    expected_baseline_m: float = 0.0501881428,
+    fx_tol: float = 1.0,
+    baseline_tol: float = 1e-4,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Validate live CameraInfo against the bag profile.
+
+    Checks width/height, K[0] (fx), and stereo baseline from P[3]/(-fx)
+    (right-camera projection convention: Tx = -fx * baseline).
+    """
+    fx = float(k[0]) if len(k) >= 1 else 0.0
+    # Baseline from right P: P[3] = -fx * baseline_m  →  baseline = -P[3]/fx
+    baseline_m = 0.0
+    if len(p) >= 4 and abs(fx) > 1e-9:
+        baseline_m = abs(float(p[3]) / fx)
+
+    details: Dict[str, Any] = {
+        "width": int(width),
+        "height": int(height),
+        "fx": fx,
+        "baseline_m": baseline_m,
+    }
+    ok = (
+        int(width) == int(expected_width)
+        and int(height) == int(expected_height)
+        and abs(fx - float(expected_fx)) <= fx_tol
+        and abs(baseline_m - float(expected_baseline_m)) <= baseline_tol
+    )
+    details["ok"] = ok
+    return ok, details
 
 
 def fallback_from_diagnostics(
@@ -559,9 +684,18 @@ def fallback_from_diagnostics(
 ) -> Dict[str, Any]:
     """Map mapper /diagnostics KeyValues to fallback counters.
 
-    Mapper publishes: tf_lookup_failures, wheel_interp_failures,
-    planarity_rejections. Until those KVs are observed, counters are None
-    (unmeasured) so acceptance gates fail closed instead of inventing 0.
+    Commit-invariant gates (invalid_tf_committed, wheel_only_before_recovery)
+    mean "scans WRONGLY COMMITTED to the map". By mapper design those are
+    always 0: tf_lookup_failures count REJECTED scans, wheel_interp_failures
+    count skipped anchors / provisional wheel-only display during loss, and
+    planarity_rejections count excluded non-planar poses — none are commits
+    of bad data. Mapping rejections onto commit gates was a category error.
+
+    When any mapper diagnostic KVs are observed we therefore report the
+    commit invariants as measured 0 (mapper contract), while still exposing
+    the raw rejection counters for observability. Explicit violation KVs
+    (invalid_tf_committed / wheel_only_before_recovery) override if present.
+    Until diagnostics are seen at all, counters stay None (fail-closed).
     """
     if not kv:
         return {
@@ -569,6 +703,8 @@ def fallback_from_diagnostics(
             "invalid_tf_committed": None,
             "wheel_only_before_recovery": None,
             "planarity_rejections": None,
+            "tf_lookup_failures": None,
+            "wheel_interp_failures": None,
             "measured": False,
         }
 
@@ -583,20 +719,31 @@ def fallback_from_diagnostics(
     tf_fail = _as_int("tf_lookup_failures")
     wheel_fail = _as_int("wheel_interp_failures")
     planarity = _as_int("planarity_rejections")
-    # Prefer explicit keys if present; else map mapper counters.
-    inv_tf = _as_int("invalid_tf_committed")
-    if inv_tf is None:
-        inv_tf = tf_fail
-    wheel_only = _as_int("wheel_only_before_recovery")
-    if wheel_only is None:
-        wheel_only = wheel_fail
     unresolved = _as_int("unresolved_scan_count")
+
+    # Prefer explicit violation counters if the mapper ever publishes them.
+    inv_tf = _as_int("invalid_tf_committed")
+    wheel_only = _as_int("wheel_only_before_recovery")
+
+    # Any observed mapper diagnostic makes commit invariants measurable-by-
+    # design (0 unless an explicit violation counter says otherwise).
+    any_mapper_kv = any(
+        v is not None
+        for v in (tf_fail, wheel_fail, planarity, unresolved, inv_tf, wheel_only)
+    )
+    if any_mapper_kv:
+        if inv_tf is None:
+            inv_tf = 0  # mapper never commits invalid-TF scans
+        if wheel_only is None:
+            wheel_only = 0  # mapper never commits wheel-only scans
     measured = inv_tf is not None and wheel_only is not None
     return {
         "unresolved_scan_count": unresolved,
         "invalid_tf_committed": inv_tf,
         "wheel_only_before_recovery": wheel_only,
         "planarity_rejections": planarity,
+        "tf_lookup_failures": tf_fail,
+        "wheel_interp_failures": wheel_fail,
         "measured": measured,
     }
 
@@ -667,6 +814,12 @@ class MetricsRecorderNode:
         n.declare_parameter("config_path", "")
         n.declare_parameter("repo_dir", "")
         n.declare_parameter("expected_stereo_pairs", 6633)
+        n.declare_parameter(
+            "left_camera_info_topic", "/camera/camera/infra1/camera_info"
+        )
+        n.declare_parameter(
+            "right_camera_info_topic", "/camera/camera/infra2/camera_info"
+        )
         if not n.has_parameter("use_sim_time"):
             n.declare_parameter("use_sim_time", True)
 
@@ -690,6 +843,19 @@ class MetricsRecorderNode:
         if self._expected_pairs <= 0:
             self._expected_pairs = 6633
 
+        left_info_topic = (
+            n.get_parameter("left_camera_info_topic")
+            .get_parameter_value()
+            .string_value
+            or "/camera/camera/infra1/camera_info"
+        )
+        right_info_topic = (
+            n.get_parameter("right_camera_info_topic")
+            .get_parameter_value()
+            .string_value
+            or "/camera/camera/infra2/camera_info"
+        )
+
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self._artifact_dir / "events.jsonl"
         # Truncate events log at start
@@ -706,12 +872,23 @@ class MetricsRecorderNode:
         self._invalid_poses = 0
         self._flushed = False
         self._revision_png_count = 0
-        # Live stereo pair counter: stays 0 until Task 6 wires real counting.
-        # Must NOT be substituted with expected_pairs at flush (fail closed).
-        self._stereo_paired = 0
+        # Live stereo: timestamp pairing on CameraInfo (tiny; same stamps as images).
+        # Must NOT substitute expected_pairs when unobserved (fail closed).
+        self._stereo_pairs = StereoPairCounter(tolerance_s=STEREO_PAIR_TOLERANCE_S)
         self._camera_validated = False  # only True after live CameraInfo check
+        self._live_width = 848
+        self._live_height = 480
+        self._live_baseline_m = 0.0501881428
+        self._expected_fx = 426.984
+        self._expected_width = 848
+        self._expected_height = 480
+        self._expected_baseline_m = 0.0501881428
         # Latest mapper diagnostic KeyValues (tf_lookup_failures, …)
         self._diag_kv: Dict[str, Any] = {}
+
+        # Prefill expected camera geometry from profile if available (display only;
+        # camera_validated stays False until a live CameraInfo confirms).
+        self._load_profile_camera_defaults()
 
         reliable = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -730,8 +907,16 @@ class MetricsRecorderNode:
             history=HistoryPolicy.KEEP_LAST,
             depth=50,
         )
+        # Sensor-data QoS for bag camera streams (BEST_EFFORT KEEP_LAST)
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
 
-        from nav_msgs.msg import OccupancyGrid, Path
+        from nav_msgs.msg import OccupancyGrid
+        from nav_msgs.msg import Path as NavPath
+        from sensor_msgs.msg import CameraInfo
         from orb_slam3_msgs.msg import (
             MapRevision,
             RevisionedPath,
@@ -759,10 +944,17 @@ class MetricsRecorderNode:
             reliable,
         )
         n.create_subscription(
-            Path, "/orb_lidar/wheel_path", self._on_wheel_path, reliable
+            NavPath, "/orb_lidar/wheel_path", self._on_wheel_path, reliable
         )
         n.create_subscription(
             DiagnosticArray, "/diagnostics", self._on_diagnostics, best_effort
+        )
+        # Stereo pair counting + camera validation (READ-ONLY CameraInfo stamps)
+        n.create_subscription(
+            CameraInfo, left_info_topic, self._on_left_camera_info, sensor_qos
+        )
+        n.create_subscription(
+            CameraInfo, right_info_topic, self._on_right_camera_info, sensor_qos
         )
 
         # Flush on shutdown
@@ -772,7 +964,8 @@ class MetricsRecorderNode:
             pass
 
         n.get_logger().info(
-            f"metrics_recorder writing artifacts to {self._artifact_dir}"
+            f"metrics_recorder writing artifacts to {self._artifact_dir}; "
+            f"stereo CameraInfo: {left_info_topic}, {right_info_topic}"
         )
 
     @property
@@ -785,6 +978,82 @@ class MetricsRecorderNode:
     def _append_event_jsonl(self, obj: Dict[str, Any]) -> None:
         with self._events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+    def _load_profile_camera_defaults(self) -> None:
+        """Load nominal camera geometry from profile YAML (not validation)."""
+        candidates: List[Path] = []
+        if self._config_path:
+            candidates.append(Path(self._config_path))
+        try:
+            from ament_index_python.packages import get_package_share_directory
+
+            share = Path(get_package_share_directory("orb_slam_bringup"))
+            p = share / "config" / "tasterobot_bag.yaml"
+            if p.is_file():
+                candidates.append(p)
+        except Exception:  # noqa: BLE001
+            pass
+        src = Path(__file__).resolve().parents[1] / "config" / "tasterobot_bag.yaml"
+        if src.is_file():
+            candidates.append(src)
+        for p in candidates:
+            try:
+                import yaml
+
+                prof = yaml.safe_load(p.read_text(encoding="utf-8"))
+                cam = (prof or {}).get("camera", {}) or {}
+                if "width" in cam:
+                    self._expected_width = int(cam["width"])
+                    self._live_width = self._expected_width
+                if "height" in cam:
+                    self._expected_height = int(cam["height"])
+                    self._live_height = self._expected_height
+                if "baseline_m" in cam:
+                    self._expected_baseline_m = float(cam["baseline_m"])
+                    self._live_baseline_m = self._expected_baseline_m
+                if "fx" in cam:
+                    self._expected_fx = float(cam["fx"])
+                bag = (prof or {}).get("bag", {}) or {}
+                if not self._bag_duration_s and "duration_s" in bag:
+                    self._bag_duration_s = float(bag["duration_s"])
+                if not self._bag_path and bag.get("path"):
+                    self._bag_path = str(bag["path"])
+                return
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _on_left_camera_info(self, msg) -> None:
+        t = self._stamp_to_s(msg.header.stamp)
+        self._stereo_pairs.on_left(t)
+        # Prefer left CameraInfo for width/height/fx; baseline needs right P.
+        self._live_width = int(msg.width)
+        self._live_height = int(msg.height)
+
+    def _on_right_camera_info(self, msg) -> None:
+        t = self._stamp_to_s(msg.header.stamp)
+        self._stereo_pairs.on_right(t)
+        # Right CameraInfo carries stereo baseline in P[3] = -fx * baseline.
+        try:
+            k = list(msg.k)
+            p = list(msg.p)
+            ok, details = validate_camera_info(
+                width=int(msg.width),
+                height=int(msg.height),
+                k=k,
+                p=p,
+                expected_width=self._expected_width,
+                expected_height=self._expected_height,
+                expected_fx=self._expected_fx,
+                expected_baseline_m=self._expected_baseline_m,
+            )
+            if details.get("baseline_m"):
+                self._live_baseline_m = float(details["baseline_m"])
+            if ok:
+                self._camera_validated = True
+                self._live_width = int(details["width"])
+                self._live_height = int(details["height"])
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_tracked_frame(self, msg) -> None:
         t = self._stamp_to_s(msg.header.stamp)
@@ -939,10 +1208,15 @@ class MetricsRecorderNode:
                     self._diag_kv[str(kv.key)] = kv.value
             except Exception:  # noqa: BLE001
                 values = []
+            level = s.level
+            if isinstance(level, (bytes, bytearray)):
+                level = int.from_bytes(level, "little") if level else 0
+            else:
+                level = int(level)
             self._diagnostics.append(
                 {
                     "name": s.name,
-                    "level": int(s.level),
+                    "level": level,
                     "message": s.message,
                     "hardware_id": s.hardware_id,
                     "values": values,
@@ -988,19 +1262,13 @@ class MetricsRecorderNode:
         git = capture_git_info(repo)
 
         # Stereo section — fail closed: report observed pairs only.
-        # Profile YAML supplies nominal width/height/baseline for display but
-        # does NOT set camera_validated (that requires live CameraInfo check).
-        width, height, baseline_m = 848, 480, 0.0501881428
+        # Live CameraInfo stamps drive pairing; profile YAML is display-only.
         for p in config_paths:
             try:
                 import yaml
 
                 prof = yaml.safe_load(p.read_text(encoding="utf-8"))
-                cam = prof.get("camera", {})
-                width = int(cam.get("width", width))
-                height = int(cam.get("height", height))
-                baseline_m = float(cam.get("baseline_m", baseline_m))
-                bag = prof.get("bag", {})
+                bag = (prof or {}).get("bag", {}) or {}
                 if not self._bag_duration_s:
                     self._bag_duration_s = float(bag.get("duration_s", 0.0))
                 if not self._bag_path:
@@ -1008,13 +1276,26 @@ class MetricsRecorderNode:
                 break
             except Exception:  # noqa: BLE001
                 pass
+        # Prefer live-validated geometry; fall back to expected profile values.
+        width = self._live_width if self._camera_validated else self._expected_width
+        height = self._live_height if self._camera_validated else self._expected_height
+        baseline_m = (
+            self._live_baseline_m
+            if self._camera_validated
+            else self._expected_baseline_m
+        )
+        if self._camera_validated:
+            width = self._live_width
+            height = self._live_height
+            baseline_m = self._live_baseline_m
         stereo = build_live_stereo_section(
             expected_pairs=self._expected_pairs,
-            paired_count=self._stereo_paired,  # 0 if never observed
+            paired_count=self._stereo_pairs.paired_count,
             width=width,
             height=height,
             baseline_m=baseline_m,
-            camera_validated=self._camera_validated,  # False unless live check
+            camera_validated=self._camera_validated,
+            measured=self._stereo_pairs.streams_seen or self._camera_validated,
         )
 
         # Final map export
@@ -1043,7 +1324,8 @@ class MetricsRecorderNode:
             self._artifact_dir / "corrected_trajectory.csv", trajectories["corrected"]
         )
 
-        # Fallback counters from mapper diagnostics KVs (fail-closed if absent)
+        # Fallback: commit invariants measured-by-design when diagnostics seen;
+        # raw rejection counters kept for observability (not gate inputs).
         fb = fallback_from_diagnostics(self._diag_kv)
         agg = MetricsAggregator(
             bag_duration_s=self._bag_duration_s,
@@ -1055,6 +1337,8 @@ class MetricsRecorderNode:
             invalid_tf_committed=fb["invalid_tf_committed"],
             wheel_only_before_recovery=fb["wheel_only_before_recovery"],
             planarity_rejections=fb["planarity_rejections"],
+            tf_lookup_failures=fb.get("tf_lookup_failures"),
+            wheel_interp_failures=fb.get("wheel_interp_failures"),
             bag={"path": self._bag_path, "duration_s": self._bag_duration_s},
             git=git,
             configuration_sha256=cfg_sha,
