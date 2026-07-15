@@ -322,7 +322,7 @@ def _setup(context, *args, **kwargs):
             )
         )
 
-    # TODO(Task 3/4): optional dashboard include.
+    # Dashboard (Task 4): HTTP + read-only foxglove_bridge when requested.
     if start_dashboard in ("true", "1", "yes"):
         dashboard_candidates = [
             bringup_share / "launch" / "dashboard.launch.py",
@@ -335,7 +335,6 @@ def _setup(context, *args, **kwargs):
                     dashboard_launch,
                     {
                         "dashboard_host": dashboard_host,
-                        "artifact_dir": artifact_dir,
                     },
                 )
             )
@@ -343,8 +342,8 @@ def _setup(context, *args, **kwargs):
             actions.append(
                 LogInfo(
                     msg=(
-                        "[bag_replay] start_dashboard=true but dashboard launch "
-                        "not found (Task 3/4); skipping"
+                        "[bag_replay] start_dashboard=true but dashboard.launch.py "
+                        "not found; skipping"
                     )
                 )
             )
@@ -427,12 +426,14 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "start_dashboard",
                 default_value="false",
-                description="Include dashboard launch if present (Task 3/4)",
+                description="Include dashboard.launch.py (HTTP + read-only bridge)",
             ),
             DeclareLaunchArgument(
                 "dashboard_host",
-                default_value="127.0.0.1",
-                description="Dashboard bind host when start_dashboard:=true",
+                default_value="100.102.92.45",
+                description=(
+                    "Tailscale/LAN bind host for dashboard when start_dashboard:=true"
+                ),
             ),
             OpaqueFunction(function=_setup),
         ]

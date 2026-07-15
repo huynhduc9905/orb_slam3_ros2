@@ -1,0 +1,14 @@
+foxglove_bridge:
+  ros__parameters:
+    address: 0.0.0.0
+    port: 8765
+    capabilities: []
+    topic_whitelist:
+      - ^/orb_lidar/(map|map_revision|corrected_path_revisioned|wheel_path|provisional_scan)$
+      - ^/orb_slam3/(tracked_frame|events|keyframes|loop_edges|tracking_image/compressed)$
+      - ^/diagnostics$
+    service_whitelist: []
+    param_whitelist: []
+    client_topic_whitelist: []
+    include_hidden: false
+    send_buffer_limit: 10000000
