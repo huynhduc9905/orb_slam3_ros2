@@ -3,7 +3,7 @@
 <package format="3">
   <name>orb_slam_bringup</name>
   <version>1.0.0</version>
-  <description>Bag replay, supplemental TF, TF audit, and launch for ORB-SLAM3 lidar mapping.</description>
+  <description>Bag replay, supplemental TF, TF audit, metrics, and launch for ORB-SLAM3 lidar mapping.</description>
   <maintainer email="duc@example.com">duc</maintainer>
   <license>GPL-3.0-or-later</license>
 
@@ -18,7 +18,9 @@
   <depend>sensor_msgs</depend>
   <depend>tf2_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>diagnostic_msgs</depend>
   <depend>rosbag2_py</depend>
+  <depend>orb_slam3_msgs</depend>
 
   <exec_depend>orb_slam3_wrapper</exec_depend>
   <exec_depend>orb_lidar_mapper</exec_depend>

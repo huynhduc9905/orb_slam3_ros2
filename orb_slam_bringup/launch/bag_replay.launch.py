@@ -298,29 +298,26 @@ def _setup(context, *args, **kwargs):
         )
     )
 
-    # TODO(Task 5): metrics_recorder — include when package/launch exists.
-    # Guarded so absence does not break launch load.
-    metrics_candidates = [
-        bringup_share / "launch" / "metrics_recorder.launch.py",
-        Path(__file__).resolve().parent / "metrics_recorder.launch.py",
-    ]
-    metrics_launch = next((p for p in metrics_candidates if p.is_file()), None)
-    if metrics_launch is not None:
-        actions.append(
-            _optional_include(
-                metrics_launch,
+    # Metrics recorder (Task 5): read-only subscribers; flushes on bag-exit Shutdown.
+    actions.append(
+        Node(
+            package="orb_slam_bringup",
+            executable="metrics_recorder",
+            name="metrics_recorder",
+            parameters=[
                 {
+                    "use_sim_time": True,
                     "artifact_dir": artifact_dir,
-                    "use_sim_time": "true",
-                },
-            )
+                    "bag_path": bag_path,
+                    "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
+                    "config_path": str(profile_path),
+                    "repo_dir": str(Path(__file__).resolve().parents[2]),
+                    "expected_stereo_pairs": 6633,
+                }
+            ],
+            output="screen",
         )
-    else:
-        actions.append(
-            LogInfo(
-                msg="[bag_replay] metrics_recorder not present yet (Task 5); skipping"
-            )
-        )
+    )
 
     # Dashboard (Task 4): HTTP + read-only foxglove_bridge when requested.
     if start_dashboard in ("true", "1", "yes"):

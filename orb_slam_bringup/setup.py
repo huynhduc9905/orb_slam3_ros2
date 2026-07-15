@@ -28,7 +28,10 @@ setup(
     zip_safe=True,
     maintainer="duc",
     maintainer_email="duc@example.com",
-    description="Bag replay, supplemental TF, TF audit, and launch for ORB-SLAM3 lidar mapping.",
+    description=(
+        "Bag replay, supplemental TF, TF audit, metrics, and launch "
+        "for ORB-SLAM3 lidar mapping."
+    ),
     license="GPL-3.0-or-later",
     extras_require={
         "test": ["pytest"],
@@ -37,6 +40,9 @@ setup(
         "console_scripts": [
             "odom_tf_adapter = orb_slam_bringup.odom_tf_adapter:main",
             "tf_audit = orb_slam_bringup.tf_audit:main",
+            "metrics_recorder = orb_slam_bringup.metrics_recorder:main",
+            "orb_slam_report_check = orb_slam_bringup.report:check_main",
+            "orb_slam_compare_runs = orb_slam_bringup.report:compare_main",
         ],
     },
 )
