@@ -1,0 +1,30 @@
+{
+  "name": "orb-slam-dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "test": "vitest",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@foxglove/rosmsg": "5.0.5",
+    "@foxglove/rosmsg2-serialization": "3.1.2",
+    "@foxglove/ws-protocol": "0.8.0",
+    "lucide-react": "1.24.0",
+    "pixi.js": "8.19.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@testing-library/react": "16.3.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
+  }
+}
