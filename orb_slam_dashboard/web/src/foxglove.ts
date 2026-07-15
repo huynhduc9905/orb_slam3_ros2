@@ -415,7 +415,13 @@ export function createDashboardConnection(
       closed = false;
       store.setConnection("connecting");
       readers.clear();
-      ws = webSocketFactory(url, [FoxgloveClient.SUPPORTED_SUBPROTOCOL]);
+      // foxglove_bridge 3.x (Rust SDK) speaks foxglove.sdk.v1; older C++
+      // bridges and @foxglove/ws-protocol's default speak foxglove.websocket.v1.
+      // Offer both so the server can pick; sdk first for our kilted bridge.
+      ws = webSocketFactory(url, [
+        "foxglove.sdk.v1",
+        FoxgloveClient.SUPPORTED_SUBPROTOCOL,
+      ]);
       attachClient(ws);
     },
 
