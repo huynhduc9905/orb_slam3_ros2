@@ -71,6 +71,15 @@ class Recorder {
       return false;
     });
   }
+  bool waitForPublishedCommittedCount(std::uint64_t count) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return cv.wait_for(lock, 2s, [&] {
+      for (const RebuildStatus& status : statuses) {
+        if (status.state == RebuildState::kPublished && status.committed_scan_count >= count) return true;
+      }
+      return false;
+    });
+  }
   bool waitForStatus(RebuildState state, std::uint64_t revision) {
     std::unique_lock<std::mutex> lock(mutex);
     return cv.wait_for(lock, 2s, [&] {
@@ -140,6 +149,71 @@ TEST(MapRebuilder, IncrementalAppendPublishesImmutableSnapshot) {
   ASSERT_TRUE(recorder.waitFor(4));
   EXPECT_EQ(first->committed_scan_count, 1U);
   EXPECT_EQ(first->grid.cellAt(2, 0), -1);
+}
+
+TEST(MapRebuilder, ReadyIncrementalsCoalesceIntoOneAtomicPublication) {
+  Gate full_gate;
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_rebuild_scan = [&](std::uint64_t revision, std::uint64_t) {
+    if (revision == 1) {
+      full_gate.arrive();
+      full_gate.block();
+    }
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.requestRebuild(trajectory(1, {pose(1)}), archive({scan(1)}));
+  full_gate.wait();
+  rebuilder.appendCommitted(scan(2), pose(2), 1);
+  rebuilder.appendCommitted(scan(3), pose(3), 1);
+  rebuilder.appendCommitted(scan(4), pose(4), 1);
+  full_gate.release();
+
+  ASSERT_TRUE(recorder.waitForPublishedCommittedCount(4));
+  ASSERT_EQ(rebuilder.current()->committed_scan_count, 4U);
+  EXPECT_EQ(recorder.published(1), 2U);
+  const auto statuses = recorder.copyStatuses();
+  bool saw_batched_publication{};
+  for (const RebuildStatus& status : statuses) {
+    if (status.state == RebuildState::kPublished && status.graph_revision == 1 &&
+        status.input_scan_count == 3 && status.committed_scan_count == 4) {
+      saw_batched_publication = true;
+    }
+  }
+  EXPECT_TRUE(saw_batched_publication);
+}
+
+TEST(MapRebuilder, PendingFullRebuildPreemptsDeferredIncrementalBatch) {
+  Gate incremental_gate;
+  Recorder recorder;
+  MapRebuilderTestHooks hooks;
+  hooks.before_incremental_commit = [&](std::uint64_t id) {
+    if (id == 2) {
+      incremental_gate.arrive();
+      incremental_gate.block();
+    }
+  };
+  MapRebuilder rebuilder({}, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); }, hooks);
+
+  rebuilder.appendCommitted(scan(1), pose(1), 1);
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  ASSERT_TRUE(recorder.waitForStatus(RebuildState::kIdle, 1));
+  const std::size_t before_full = recorder.copyStatuses().size();
+  rebuilder.appendCommitted(scan(2), pose(2), 1);
+  incremental_gate.wait();
+  rebuilder.appendCommitted(scan(3), pose(3), 1);
+  rebuilder.appendCommitted(scan(4), pose(4), 1);
+  rebuilder.requestRebuild(trajectory(2, {pose(1)}), archive({scan(1)}));
+  incremental_gate.release();
+
+  ASSERT_TRUE(recorder.waitForPublishedRevision(2));
+  const auto statuses = recorder.copyStatuses();
+  const std::size_t building = recorder.statusIndex(RebuildState::kBuilding, 2);
+  ASSERT_LT(building, statuses.size());
+  for (std::size_t i = before_full; i < building; ++i) {
+    EXPECT_NE(statuses[i].state, RebuildState::kPublished);
+  }
 }
 
 TEST(MapRebuilder, NewerRequestAtFinalGatePreventsObsoletePublication) {

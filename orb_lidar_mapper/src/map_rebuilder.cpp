@@ -15,6 +15,10 @@
 namespace orb_lidar_mapper {
 namespace {
 
+// Cap every incremental publication so a full request waits for no more than
+// this many complete scan updates before receiving worker priority.
+constexpr std::size_t kMaxIncrementalsPerPublication = 8;
+
 Point2 transform(const Pose2& pose, Point2 point) {
   const double cosine = std::cos(pose.yaw);
   const double sine = std::sin(pose.yaw);
@@ -220,109 +224,116 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
     }
   }
 
-  void incremental(Incremental item) noexcept {
+  void incremental(std::vector<Incremental> items) noexcept {
+    std::vector<Incremental> batch;
+    batch.reserve(items.size());
+    std::size_t active_index{};
     try {
       std::unique_ptr<TiledOccupancyGrid> candidate_grid;
-      bool stale{};
+      std::unordered_set<std::uint64_t> batch_scan_ids;
       {
         std::lock_guard<std::mutex> lock(mutex);
-        if (stop || applied_scan_ids.count(item.scan.scan_id) != 0) return;
-        if (item.graph_revision < committed_graph_revision) {
-          if (item.deferred_by_full) stale_incrementals.push_back(std::move(item));
-          stale = true;
-        } else {
-          candidate_grid = std::make_unique<TiledOccupancyGrid>(*grid);
+        if (stop) return;
+        for (Incremental& item : items) {
+          if (applied_scan_ids.count(item.scan.scan_id) != 0 ||
+              !batch_scan_ids.insert(item.scan.scan_id).second) continue;
+          if (item.graph_revision < committed_graph_revision) {
+            if (item.deferred_by_full) stale_incrementals.push_back(std::move(item));
+            failures.push_back({committed_graph_revision, 1, request_generation,
+                                "incremental update stale after full rebuild"});
+            continue;
+          }
+          batch.push_back(std::move(item));
         }
+        if (!batch.empty()) candidate_grid = std::make_unique<TiledOccupancyGrid>(*grid);
       }
-      if (stale) {
-        std::uint64_t generation{};
-        std::uint64_t graph_revision{};
-        {
-          std::lock_guard<std::mutex> lock(mutex);
-          generation = request_generation;
-          graph_revision = committed_graph_revision;
-          failures.push_back({graph_revision, 1, generation,
-                              "incremental update stale after full rebuild"});
-        }
+      if (batch.empty()) {
         cv.notify_one();
         return;
       }
-      candidate_grid->insert(transformed(item.scan, item.pose));
+
+      for (; active_index < batch.size(); ++active_index) {
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (stop) return;
+          if (full_request || active_full) {
+            for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+              it->deferred_by_full = true;
+              incrementals.push_front(std::move(*it));
+            }
+            return;
+          }
+        }
+        candidate_grid->insert(transformed(batch[active_index].scan, batch[active_index].pose));
+        if (hooks.before_incremental_commit) hooks.before_incremental_commit(batch[active_index].scan.scan_id);
+      }
       GridSnapshot candidate_snapshot = candidate_grid->snapshot();
       auto snapshot = std::make_shared<MapSnapshot>();
       snapshot->grid = std::move(candidate_snapshot);
-      if (hooks.before_incremental_commit) hooks.before_incremental_commit(item.scan.scan_id);
       RebuildStatus published;
       std::uint64_t generation{};
       {
         std::lock_guard<std::mutex> lock(mutex);
-        if (stop || applied_scan_ids.count(item.scan.scan_id) != 0) return;
-        if (item.graph_revision < committed_graph_revision) {
-          if (item.deferred_by_full) stale_incrementals.push_back(std::move(item));
-          stale = true;
-        }
-        if (stale) {
-          // The diagnostic is emitted after releasing the lock.
-        } else if (full_request || active_full) {
-          item.deferred_by_full = true;
-          incrementals.push_front(std::move(item));
+        if (stop) return;
+        if (full_request || active_full) {
+          for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+            it->deferred_by_full = true;
+            incrementals.push_front(std::move(*it));
+          }
           return;
         } else {
           grid = std::move(candidate_grid);
-          ++committed_scan_count;
-          committed_graph_revision = std::max(committed_graph_revision, item.graph_revision);
-          applied_scan_ids.insert(item.scan.scan_id);
-          const auto erase_scan = [&item](auto& items) {
-            items.erase(std::remove_if(items.begin(), items.end(), [&item](const Incremental& candidate) {
-              return candidate.scan.scan_id == item.scan.scan_id;
+          committed_scan_count += batch.size();
+          for (const Incremental& item : batch) {
+            committed_graph_revision = std::max(committed_graph_revision, item.graph_revision);
+            applied_scan_ids.insert(item.scan.scan_id);
+          }
+          const auto erase_batch = [&batch](auto& items) {
+            items.erase(std::remove_if(items.begin(), items.end(), [&batch](const Incremental& candidate) {
+              return std::any_of(batch.begin(), batch.end(), [&candidate](const Incremental& item) {
+                return item.scan.scan_id == candidate.scan.scan_id;
+              });
             }), items.end());
           };
-          erase_scan(retry_exhausted_incrementals);
-          erase_scan(stale_incrementals);
+          erase_batch(retry_exhausted_incrementals);
+          erase_batch(stale_incrementals);
           snapshot->graph_revision = committed_graph_revision;
           snapshot->map_revision = ++map_revision;
           snapshot->committed_scan_count = committed_scan_count;
           current_snapshot = snapshot;
           generation = request_generation;
-          published = {RebuildState::kPublished, snapshot->graph_revision, snapshot->map_revision, 1,
+          published = {RebuildState::kPublished, snapshot->graph_revision, snapshot->map_revision, batch.size(),
                        snapshot->committed_scan_count, 0.0, {}};
         }
       }
-      if (stale) {
-        std::uint64_t generation{};
-        std::uint64_t graph_revision{};
-        {
-          std::lock_guard<std::mutex> lock(mutex);
-          generation = request_generation;
-          graph_revision = committed_graph_revision;
-          failures.push_back({graph_revision, 1, generation,
-                              "incremental update stale after full rebuild"});
-        }
-        cv.notify_one();
-        return;
-      }
       invoke(snapshot, published);
-      finishIdleIfQuiescent(generation, published.graph_revision, 1,
+      finishIdleIfQuiescent(generation, published.graph_revision, batch.size(),
                             published.committed_scan_count, 0.0);
     } catch (...) {
       std::uint64_t generation{};
-      const std::uint64_t graph_revision = item.graph_revision;
+      const std::size_t failed_index = batch.empty() ? 0 : std::min(active_index, batch.size() - 1);
+      const std::uint64_t graph_revision = batch.empty() ? 0 : batch[failed_index].graph_revision;
       bool retry{};
       bool enqueue_failure{};
       {
         std::lock_guard<std::mutex> lock(mutex);
         generation = request_generation;
-        if (!stop && item.graph_revision >= committed_graph_revision &&
-            applied_scan_ids.count(item.scan.scan_id) == 0) {
-          if (item.retries == 0) {
-            ++item.retries;
-            incrementals.push_back(std::move(item));
-            retry = true;
-          } else {
-            retry_exhausted_incrementals.push_back(std::move(item));
-          }
-        }
         if (!stop) {
+          for (std::size_t index = batch.size(); index-- > 0;) {
+            Incremental& item = batch[index];
+            if (item.graph_revision < committed_graph_revision ||
+                applied_scan_ids.count(item.scan.scan_id) != 0) continue;
+            if (index == failed_index) {
+              if (item.retries == 0) {
+                ++item.retries;
+                retry = true;
+              } else {
+                retry_exhausted_incrementals.push_back(std::move(item));
+                continue;
+              }
+            }
+            incrementals.push_front(std::move(item));
+          }
           failures.push_back({graph_revision, 1, generation, "incremental update failed"});
           enqueue_failure = true;
         }
@@ -335,7 +346,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
   void run() noexcept {
     while (true) {
       std::optional<FullRequest> full;
-      std::optional<Incremental> item;
+      std::vector<Incremental> items;
       std::optional<Failure> failure;
       {
         std::unique_lock<std::mutex> lock(mutex);
@@ -349,15 +360,17 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
           failure = std::move(failures.front());
           failures.pop_front();
         } else {
-          item = std::move(incrementals.front());
-          incrementals.pop_front();
+          while (!incrementals.empty() && items.size() < kMaxIncrementalsPerPublication) {
+            items.push_back(std::move(incrementals.front()));
+            incrementals.pop_front();
+          }
         }
       }
       if (full) {
         emit(RebuildState::kBuilding, full->trajectory->graph_revision, full->archive->scans.size(), 0, 0.0);
         rebuild(std::move(*full));
-      } else if (item) {
-        incremental(std::move(*item));
+      } else if (!items.empty()) {
+        incremental(std::move(items));
       } else if (failure) {
         bool eligible{};
         std::uint64_t generation{};
@@ -442,7 +455,6 @@ void MapRebuilder::requestRebuild(std::shared_ptr<const TrajectoryRevision> traj
   request.archive = std::move(archive);
   request.represented.reserve(request.archive->scans.size());
   for (const ArchivedScan& scan : request.archive->scans) request.represented.insert(scan.scan_id);
-  const std::size_t input_count = request.archive->scans.size();
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     const std::uint64_t revision = request.trajectory->graph_revision;
