@@ -51,6 +51,8 @@ def _passing_metrics() -> dict:
             "unresolved_scan_count": 0,
             "invalid_tf_committed": 0,
             "wheel_only_before_recovery": 0,
+            "planarity_rejections": 0,
+            "measured": True,
         },
         "loops": [
             {"t": 80.0, "graph_revision": 5, "map_id": 1, "detail": "loop-a"},
@@ -264,3 +266,64 @@ def test_every_loop_requires_completed_rebuild_gate():
     result = check_acceptance(m)
     assert result["pass"] is False
     assert any(g["name"] == "loop_rebuild_complete" for g in result["failed"])
+
+
+def _unmeasured_metrics() -> dict:
+    """Live-recorder defaults: stereo/camera/fallback never instrumented."""
+    m = json.loads(json.dumps(_passing_metrics()))
+    m["stereo"]["paired_count"] = 0
+    m["stereo"]["paired_ratio"] = 0.0
+    m["stereo"]["camera_validated"] = False
+    # Unmeasured fallback counters must not be confident zeros
+    m["fallback"]["invalid_tf_committed"] = None
+    m["fallback"]["wheel_only_before_recovery"] = None
+    m["fallback"]["unresolved_scan_count"] = None
+    return m
+
+
+def test_unmeasured_run_fails_acceptance_gates():
+    """Fail-closed: uninstrumented stereo/camera/fallback must not green-light."""
+    result = check_acceptance(_unmeasured_metrics())
+    assert result["pass"] is False
+    names = {g["name"] for g in result["failed"]}
+    assert "stereo_paired_ratio" in names
+    assert "camera_validated" in names
+    assert "invalid_tf_committed" in names
+    assert "wheel_only_before_recovery" in names
+
+
+def test_check_main_nonzero_on_unmeasured_metrics(tmp_path: Path):
+    from orb_slam_bringup import report as report_mod
+
+    path = tmp_path / "unmeasured.json"
+    path.write_text(json.dumps(_unmeasured_metrics()), encoding="utf-8")
+    assert report_mod.check_main(["check", str(path)]) != 0
+
+
+def test_check_main_zero_on_measured_passing_metrics(tmp_path: Path):
+    from orb_slam_bringup import report as report_mod
+
+    path = tmp_path / "measured_good.json"
+    path.write_text(json.dumps(_passing_metrics()), encoding="utf-8")
+    assert report_mod.check_main(["check", str(path)]) == 0
+
+
+def test_fallback_unmeasured_sentinel_fails_even_when_other_gates_pass():
+    m = _passing_metrics()
+    m["fallback"]["invalid_tf_committed"] = None
+    result = check_acceptance(m)
+    assert result["pass"] is False
+    assert any(g["name"] == "invalid_tf_committed" for g in result["failed"])
+
+
+def test_compare_runs_non_overlapping_timestamps_fails():
+    """Different time bases: all samples skipped → must FAIL, not silent pass."""
+    a = _passing_metrics()
+    b = json.loads(json.dumps(a))
+    # Shift B trajectories far outside the 0.05s match window
+    for name in ("orb", "wheel", "corrected"):
+        for pt in b["trajectories"][name]:
+            pt["t"] = float(pt["t"]) + 1000.0
+    result = compare_runs(a, b)
+    assert result["pass"] is False
+    assert any("trajectory" in m.lower() for m in result["mismatches"])

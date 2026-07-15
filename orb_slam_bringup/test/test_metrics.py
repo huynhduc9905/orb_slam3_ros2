@@ -336,3 +336,62 @@ def test_atomic_write_json(tmp_path: Path):
     # No leftover temp files
     temps = list(tmp_path.glob(".*")) + list(tmp_path.glob("*.tmp"))
     assert temps == []
+
+
+def test_live_stereo_section_fail_closed_when_unmeasured():
+    """Unobserved stereo must report 0 pairs / 0.0 ratio / camera_validated False."""
+    from orb_slam_bringup.metrics_recorder import build_live_stereo_section
+
+    stereo = build_live_stereo_section(expected_pairs=6633, paired_count=0)
+    assert stereo["paired_count"] == 0
+    assert stereo["paired_ratio"] == 0.0
+    assert stereo["camera_validated"] is False
+    # Must NOT invent expected_pairs as paired_count
+    assert stereo["paired_count"] != stereo["expected_pairs"]
+
+
+def test_live_stereo_section_measured_good():
+    from orb_slam_bringup.metrics_recorder import build_live_stereo_section
+
+    stereo = build_live_stereo_section(
+        expected_pairs=6633,
+        paired_count=6600,
+        camera_validated=True,
+    )
+    assert stereo["paired_count"] == 6600
+    assert stereo["paired_ratio"] == pytest.approx(6600 / 6633)
+    assert stereo["camera_validated"] is True
+
+
+def test_fallback_from_diagnostics_unmeasured_is_none():
+    from orb_slam_bringup.metrics_recorder import fallback_from_diagnostics
+
+    fb = fallback_from_diagnostics(None)
+    assert fb["invalid_tf_committed"] is None
+    assert fb["wheel_only_before_recovery"] is None
+    assert fb["measured"] is False
+
+
+def test_fallback_from_diagnostics_maps_mapper_kvs():
+    from orb_slam_bringup.metrics_recorder import fallback_from_diagnostics
+
+    fb = fallback_from_diagnostics(
+        {
+            "tf_lookup_failures": 0,
+            "wheel_interp_failures": 0,
+            "planarity_rejections": 2,
+        }
+    )
+    assert fb["measured"] is True
+    assert fb["invalid_tf_committed"] == 0
+    assert fb["wheel_only_before_recovery"] == 0
+    assert fb["planarity_rejections"] == 2
+
+
+def test_aggregator_default_fallback_unmeasured():
+    """MetricsAggregator with no fallback inputs must not invent confident zeros."""
+    agg = MetricsAggregator(bag_duration_s=1.0)
+    m = agg.compute()
+    # Fail-closed: unmeasured counters are None (not 0)
+    assert m["fallback"]["invalid_tf_committed"] is None
+    assert m["fallback"]["wheel_only_before_recovery"] is None

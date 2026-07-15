@@ -131,25 +131,29 @@ def check_acceptance(metrics: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
 
-    # Invalid TF / trajectory committed
-    inv_tf = int(fallback.get("invalid_tf_committed", 0))
+    # Invalid TF / trajectory committed (None / missing = unmeasured → FAIL closed)
+    inv_tf_ok, inv_tf_actual = _zero_count_gate(
+        fallback, "invalid_tf_committed"
+    )
     gates.append(
         _gate(
             "invalid_tf_committed",
-            inv_tf == 0,
-            f"{inv_tf}",
-            "== 0",
+            inv_tf_ok,
+            inv_tf_actual,
+            "== 0 (measured)",
         )
     )
 
-    # Wheel-only before recovery
-    wheel_only = int(fallback.get("wheel_only_before_recovery", 0))
+    # Wheel-only before recovery (None / missing = unmeasured → FAIL closed)
+    wheel_ok, wheel_actual = _zero_count_gate(
+        fallback, "wheel_only_before_recovery"
+    )
     gates.append(
         _gate(
             "wheel_only_before_recovery",
-            wheel_only == 0,
-            f"{wheel_only}",
-            "== 0",
+            wheel_ok,
+            wheel_actual,
+            "== 0 (measured)",
         )
     )
 
@@ -199,6 +203,27 @@ def _gate(name: str, passed: bool, actual: str, expected: str) -> Dict[str, Any]
         "actual": actual,
         "expected": expected,
     }
+
+
+def _zero_count_gate(
+    section: Dict[str, Any], key: str
+) -> tuple[bool, str]:
+    """Pass only when key is present, measured, and equal to 0.
+
+    Missing key or explicit None / "unmeasured" fails closed (never invents 0).
+    """
+    if key not in section:
+        return False, "unmeasured"
+    raw = section[key]
+    if raw is None:
+        return False, "unmeasured"
+    if isinstance(raw, str) and raw.strip().lower() in ("unmeasured", "unknown", ""):
+        return False, "unmeasured"
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return False, f"unmeasured ({raw!r})"
+    return value == 0, str(value)
 
 
 def compare_runs(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
@@ -265,18 +290,30 @@ def _trajectory_mismatch(
     b: Sequence[Dict[str, float]],
     pos_tol: float,
     yaw_tol: float,
+    *,
+    time_tol_s: float = 0.05,
+    min_match_fraction: float = 0.5,
 ) -> Optional[str]:
+    """Compare trajectories at nearest timestamps.
+
+    Fail-closed: if too few samples share a timestamp within ``time_tol_s``
+    (non-overlapping time bases), return a mismatch instead of silent pass.
+    """
     if not a and not b:
         return None
     if not a or not b:
         return f"length {len(a)} vs {len(b)}"
+    smaller = min(len(a), len(b))
+    min_matched = max(1, int(math.ceil(min_match_fraction * smaller)))
+    matched = 0
     # Match by nearest timestamp
     for pa in a:
         t = float(pa.get("t", 0.0))
         # nearest in b
         pb = min(b, key=lambda q: abs(float(q.get("t", 0.0)) - t))
-        if abs(float(pb.get("t", 0.0)) - t) > 0.05:
+        if abs(float(pb.get("t", 0.0)) - t) > time_tol_s:
             continue  # no close timestamp
+        matched += 1
         dx = float(pa.get("x", 0.0)) - float(pb.get("x", 0.0))
         dy = float(pa.get("y", 0.0)) - float(pb.get("y", 0.0))
         dist = math.hypot(dx, dy)
@@ -285,6 +322,11 @@ def _trajectory_mismatch(
         dyaw = _angle_diff(float(pa.get("yaw", 0.0)), float(pb.get("yaw", 0.0)))
         if abs(dyaw) > yaw_tol:
             return f"yaw delta {math.degrees(dyaw):.3f}deg at t={t}"
+    if matched < min_matched:
+        return (
+            f"too few matched samples: {matched}/{smaller} "
+            f"(need >= {min_matched}, fraction {min_match_fraction:.0%})"
+        )
     return None
 
 

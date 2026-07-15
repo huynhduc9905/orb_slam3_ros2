@@ -136,9 +136,11 @@ class MetricsAggregator:
     events: List[TrackingEventSample] = field(default_factory=list)
     revisions: List[MapRevisionSample] = field(default_factory=list)
     final_map: Optional[MapGridSample] = None
-    unresolved_scan_count: int = 0
-    invalid_tf_committed: int = 0
-    wheel_only_before_recovery: int = 0
+    # None = unmeasured (fail-closed at acceptance gates). Explicit 0 is measured-good.
+    unresolved_scan_count: Optional[int] = None
+    invalid_tf_committed: Optional[int] = None
+    wheel_only_before_recovery: Optional[int] = None
+    planarity_rejections: Optional[int] = None
     bag: Optional[Dict[str, Any]] = None
     git: Optional[Dict[str, Any]] = None
     configuration_sha256: str = ""
@@ -229,6 +231,11 @@ class MetricsAggregator:
                 "unresolved_scan_count": self.unresolved_scan_count,
                 "invalid_tf_committed": self.invalid_tf_committed,
                 "wheel_only_before_recovery": self.wheel_only_before_recovery,
+                "planarity_rejections": self.planarity_rejections,
+                "measured": (
+                    self.invalid_tf_committed is not None
+                    and self.wheel_only_before_recovery is not None
+                ),
             },
             "loops": loops,
             "map_revisions": map_revisions,
@@ -517,6 +524,117 @@ def yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def build_live_stereo_section(
+    *,
+    expected_pairs: int = 6633,
+    paired_count: int = 0,
+    width: int = 848,
+    height: int = 480,
+    baseline_m: float = 0.0501881428,
+    camera_validated: bool = False,
+) -> Dict[str, Any]:
+    """Stereo metrics for live flush — fail-closed defaults.
+
+    Does NOT invent paired_count from expected_pairs. camera_validated stays
+    False unless a live CameraInfo/profile validation path sets it True.
+    Loading YAML profile values alone is NOT validation.
+    """
+    expected = int(expected_pairs) if expected_pairs > 0 else 6633
+    paired = max(0, int(paired_count))
+    ratio = (paired / float(expected)) if expected > 0 else 0.0
+    return {
+        "expected_pairs": expected,
+        "paired_count": paired,
+        "paired_ratio": ratio,
+        "width": int(width),
+        "height": int(height),
+        "baseline_m": float(baseline_m),
+        "camera_validated": bool(camera_validated),
+        "measured": paired > 0 or bool(camera_validated),
+    }
+
+
+def fallback_from_diagnostics(
+    kv: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Map mapper /diagnostics KeyValues to fallback counters.
+
+    Mapper publishes: tf_lookup_failures, wheel_interp_failures,
+    planarity_rejections. Until those KVs are observed, counters are None
+    (unmeasured) so acceptance gates fail closed instead of inventing 0.
+    """
+    if not kv:
+        return {
+            "unresolved_scan_count": None,
+            "invalid_tf_committed": None,
+            "wheel_only_before_recovery": None,
+            "planarity_rejections": None,
+            "measured": False,
+        }
+
+    def _as_int(key: str) -> Optional[int]:
+        if key not in kv:
+            return None
+        try:
+            return int(kv[key])
+        except (TypeError, ValueError):
+            return None
+
+    tf_fail = _as_int("tf_lookup_failures")
+    wheel_fail = _as_int("wheel_interp_failures")
+    planarity = _as_int("planarity_rejections")
+    # Prefer explicit keys if present; else map mapper counters.
+    inv_tf = _as_int("invalid_tf_committed")
+    if inv_tf is None:
+        inv_tf = tf_fail
+    wheel_only = _as_int("wheel_only_before_recovery")
+    if wheel_only is None:
+        wheel_only = wheel_fail
+    unresolved = _as_int("unresolved_scan_count")
+    measured = inv_tf is not None and wheel_only is not None
+    return {
+        "unresolved_scan_count": unresolved,
+        "invalid_tf_committed": inv_tf,
+        "wheel_only_before_recovery": wheel_only,
+        "planarity_rejections": planarity,
+        "measured": measured,
+    }
+
+
+def extract_diagnostic_kvs(diagnostics: Sequence[Any]) -> Dict[str, Any]:
+    """Flatten latest KeyValue pairs from stored diagnostic snapshots.
+
+    Accepts either:
+    - list of status dicts with optional ``values`` list of {key,value}
+    - list of already-flattened kv dicts
+    Later entries overwrite earlier ones (latest wins).
+    """
+    out: Dict[str, Any] = {}
+    if not diagnostics:
+        return out
+    for entry in diagnostics:
+        if not isinstance(entry, dict):
+            continue
+        values = entry.get("values")
+        if isinstance(values, list):
+            for kv in values:
+                if isinstance(kv, dict) and "key" in kv:
+                    out[str(kv["key"])] = kv.get("value")
+        else:
+            # Already a flat map of counters
+            for k, v in entry.items():
+                if k in (
+                    "name",
+                    "level",
+                    "message",
+                    "hardware_id",
+                    "values",
+                ):
+                    continue
+                out[str(k)] = v
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ROS node
 # ---------------------------------------------------------------------------
@@ -588,7 +706,12 @@ class MetricsRecorderNode:
         self._invalid_poses = 0
         self._flushed = False
         self._revision_png_count = 0
-        self._stereo_paired = 0  # optional; filled if frames imply stereo
+        # Live stereo pair counter: stays 0 until Task 6 wires real counting.
+        # Must NOT be substituted with expected_pairs at flush (fail closed).
+        self._stereo_paired = 0
+        self._camera_validated = False  # only True after live CameraInfo check
+        # Latest mapper diagnostic KeyValues (tf_lookup_failures, …)
+        self._diag_kv: Dict[str, Any] = {}
 
         reliable = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -809,12 +932,20 @@ class MetricsRecorderNode:
 
     def _on_diagnostics(self, msg) -> None:
         for s in msg.status:
+            values = []
+            try:
+                for kv in s.values:
+                    values.append({"key": str(kv.key), "value": str(kv.value)})
+                    self._diag_kv[str(kv.key)] = kv.value
+            except Exception:  # noqa: BLE001
+                values = []
             self._diagnostics.append(
                 {
                     "name": s.name,
                     "level": int(s.level),
                     "message": s.message,
                     "hardware_id": s.hardware_id,
+                    "values": values,
                 }
             )
 
@@ -856,26 +987,19 @@ class MetricsRecorderNode:
         repo = self._repo_dir or str(Path(__file__).resolve().parents[2])
         git = capture_git_info(repo)
 
-        # Stereo section (camera validated from profile if available)
-        stereo: Dict[str, Any] = {
-            "expected_pairs": self._expected_pairs,
-            "paired_count": self._stereo_paired or self._expected_pairs,
-            "paired_ratio": 1.0,
-            "width": 848,
-            "height": 480,
-            "baseline_m": 0.0501881428,
-            "camera_validated": True,
-        }
-        # Load profile if present for camera fields
+        # Stereo section — fail closed: report observed pairs only.
+        # Profile YAML supplies nominal width/height/baseline for display but
+        # does NOT set camera_validated (that requires live CameraInfo check).
+        width, height, baseline_m = 848, 480, 0.0501881428
         for p in config_paths:
             try:
                 import yaml
 
                 prof = yaml.safe_load(p.read_text(encoding="utf-8"))
                 cam = prof.get("camera", {})
-                stereo["width"] = int(cam.get("width", 848))
-                stereo["height"] = int(cam.get("height", 480))
-                stereo["baseline_m"] = float(cam.get("baseline_m", 0.0501881428))
+                width = int(cam.get("width", width))
+                height = int(cam.get("height", height))
+                baseline_m = float(cam.get("baseline_m", baseline_m))
                 bag = prof.get("bag", {})
                 if not self._bag_duration_s:
                     self._bag_duration_s = float(bag.get("duration_s", 0.0))
@@ -884,12 +1008,14 @@ class MetricsRecorderNode:
                 break
             except Exception:  # noqa: BLE001
                 pass
-        if self._expected_pairs > 0:
-            # Without live stereo pair counter, leave paired_count as expected
-            # (Task 6 will feed real stereo stats). Ratio stays 1.0 unless set.
-            stereo["paired_ratio"] = (
-                stereo["paired_count"] / float(self._expected_pairs)
-            )
+        stereo = build_live_stereo_section(
+            expected_pairs=self._expected_pairs,
+            paired_count=self._stereo_paired,  # 0 if never observed
+            width=width,
+            height=height,
+            baseline_m=baseline_m,
+            camera_validated=self._camera_validated,  # False unless live check
+        )
 
         # Final map export
         pgm_match = True
@@ -917,12 +1043,18 @@ class MetricsRecorderNode:
             self._artifact_dir / "corrected_trajectory.csv", trajectories["corrected"]
         )
 
+        # Fallback counters from mapper diagnostics KVs (fail-closed if absent)
+        fb = fallback_from_diagnostics(self._diag_kv)
         agg = MetricsAggregator(
             bag_duration_s=self._bag_duration_s,
             frames=self._frames,
             events=self._events,
             revisions=self._revisions,
             final_map=self._last_map,
+            unresolved_scan_count=fb["unresolved_scan_count"],
+            invalid_tf_committed=fb["invalid_tf_committed"],
+            wheel_only_before_recovery=fb["wheel_only_before_recovery"],
+            planarity_rejections=fb["planarity_rejections"],
             bag={"path": self._bag_path, "duration_s": self._bag_duration_s},
             git=git,
             configuration_sha256=cfg_sha,
@@ -958,6 +1090,10 @@ def _verify_nav2_map(grid: MapGridSample, stem: Path) -> bool:
         return False
     origin = meta["origin"]
     if abs(origin[0] - grid.origin_x) > 1e-9 or abs(origin[1] - grid.origin_y) > 1e-9:
+        return False
+    # Include origin yaw so yaw drift fails pgm_yaml_match (fail-closed).
+    origin_yaw = float(origin[2]) if len(origin) > 2 else 0.0
+    if abs(origin_yaw - grid.origin_yaw) > 1e-6:
         return False
     raw = pgm_path.read_bytes()
     if not raw.startswith(b"P5"):
