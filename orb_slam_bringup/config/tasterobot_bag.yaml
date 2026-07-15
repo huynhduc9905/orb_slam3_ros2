@@ -1,0 +1,46 @@
+bag:
+  path: /home/duc/robot/20260713_152907
+  duration_s: 221.146644609
+camera:
+  left_image: /camera/camera/infra1/image_rect_raw
+  right_image: /camera/camera/infra2/image_rect_raw
+  left_info: /camera/camera/infra1/camera_info
+  right_info: /camera/camera/infra2/camera_info
+  left_frame: camera_infra1_optical_frame
+  right_frame: camera_infra2_optical_frame
+  width: 848
+  height: 480
+  fx: 426.9840393066406
+  fy: 426.9840393066406
+  cx: 430.81121826171875
+  cy: 238.95848083496094
+  baseline_m: 0.05018814280629158
+  right_camera_info_frame_is_wrong: true
+odometry:
+  topic: /odom_wheel
+  frame: odom
+  child_frame: base_link
+lidar:
+  topic: /scan_origin
+  frame: base_scan
+supplemental_tf:
+  camera_link:
+    parent: base_link
+    child: camera_link
+    xyz: [0.346, 0.01, 0.1]
+    rpy: [0.0, -0.261799388, 0.0]
+  base_scan:
+    parent: base_link
+    child: base_scan
+    xyz: [0.26, 0.0, 0.1]
+    rpy: [0.0, 0.0, 3.14159265359]
+    yaw: 3.14159265359
+# Explicit seven required input topics for bag replay (images, infos, odom, lidar, tf_static).
+required_input_topics:
+  - /camera/camera/infra1/image_rect_raw
+  - /camera/camera/infra2/image_rect_raw
+  - /camera/camera/infra1/camera_info
+  - /camera/camera/infra2/camera_info
+  - /odom_wheel
+  - /scan_origin
+  - /tf_static

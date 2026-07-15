@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>orb_slam_bringup</name>
+  <version>1.0.0</version>
+  <description>Bag replay, supplemental TF, TF audit, and launch for ORB-SLAM3 lidar mapping.</description>
+  <maintainer email="duc@example.com">duc</maintainer>
+  <license>GPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>tf2_ros</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>rosbag2_py</depend>
+
+  <exec_depend>orb_slam3_wrapper</exec_depend>
+  <exec_depend>orb_lidar_mapper</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
