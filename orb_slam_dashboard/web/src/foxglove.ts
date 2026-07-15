@@ -240,8 +240,9 @@ function handleMessage(
 
     case "/orb_slam3/keyframes": {
       // visualization_msgs/MarkerArray — markers[].pose
+      // Always update, including empty arrays, so stale keyframes clear.
       const markers = (decoded.markers as unknown[]) ?? [];
-      if (Array.isArray(markers) && markers.length > 0) {
+      if (Array.isArray(markers)) {
         const poses: Pose2[] = markers.map((m) =>
           pose2FromGeometry(
             (m as { pose?: Parameters<typeof pose2FromGeometry>[0] }).pose ?? {},

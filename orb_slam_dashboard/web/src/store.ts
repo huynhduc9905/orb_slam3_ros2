@@ -87,10 +87,11 @@ export function createDashboardStore(
         ? {
             ...state.map,
             info: { ...state.map.info },
+            // Always copy so snapshot consumers cannot mutate store internals.
             data:
               state.map.data instanceof Int8Array
-                ? state.map.data
-                : Array.from(state.map.data),
+                ? Int8Array.from(state.map.data)
+                : Int8Array.from(state.map.data),
           }
         : undefined,
     };
@@ -116,22 +117,39 @@ export function createDashboardStore(
     },
 
     setMap(map: OccupancyGrid): void {
-      commit({ ...state, map });
+      // Copy occupancy data so CDR buffer views / callers cannot mutate store.
+      const dataCopy =
+        map.data instanceof Int8Array
+          ? Int8Array.from(map.data)
+          : Int8Array.from(map.data);
+      commit({
+        ...state,
+        map: {
+          ...map,
+          info: { ...map.info },
+          data: dataCopy,
+        },
+      });
     },
 
     setMapRevision(graphRevision: bigint, mapRevision: bigint): void {
       // Atomic revision update; map data arrives on a separate topic.
+      // mapRevision is monotonic — ignore lower values (mirrors stale path drop).
       let nextGraph = state.graphRevision;
       if (graphRevision > state.graphRevision) {
         nextGraph = graphRevision;
       }
-      if (mapRevision === state.mapRevision && nextGraph === state.graphRevision) {
+      let nextMap = state.mapRevision;
+      if (mapRevision > state.mapRevision) {
+        nextMap = mapRevision;
+      }
+      if (nextMap === state.mapRevision && nextGraph === state.graphRevision) {
         return;
       }
       commit({
         ...state,
         graphRevision: nextGraph,
-        mapRevision,
+        mapRevision: nextMap,
       });
     },
 

@@ -8,6 +8,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["test/**/*.test.ts"],
+    include: ["test/**/*.{test,spec}.{ts,tsx}"],
+    // jsdom is requested per-file via @vitest-environment for layout tests
   },
 });

@@ -658,6 +658,146 @@ describe("read-only Foxglove client + dashboard store", () => {
     expect(withPath!.wheelPath).toHaveLength(2);
   });
 
+  it("copies occupancy data into a new Int8Array so callers cannot mutate the store", () => {
+    const store = createDashboardStore();
+    const shared = new Int8Array([0, 100, -1, 50]);
+    store.setMap({
+      header: { stamp: { sec: 0 }, frame_id: "orb_map" },
+      info: {
+        resolution: 0.05,
+        width: 2,
+        height: 2,
+        origin: {
+          position: { x: 0, y: 0, z: 0 },
+          orientation: { x: 0, y: 0, z: 0, w: 1 },
+        },
+      },
+      data: shared,
+    });
+    const snap = store.getState();
+    expect(snap.map).toBeDefined();
+    expect(snap.map!.data).toBeInstanceOf(Int8Array);
+    expect(snap.map!.data).not.toBe(shared);
+    expect(Array.from(snap.map!.data)).toEqual([0, 100, -1, 50]);
+    // Mutating the original buffer must not affect the stored copy.
+    shared[0] = 99;
+    expect(Array.from(store.getState().map!.data)).toEqual([0, 100, -1, 50]);
+    // Mutating a snapshot must not affect the store either.
+    const data = store.getState().map!.data as Int8Array;
+    data[1] = 42;
+    expect(Array.from(store.getState().map!.data)).toEqual([0, 100, -1, 50]);
+  });
+
+  it("ignores map_revision lower than the current (monotonic)", () => {
+    const store = createDashboardStore();
+    store.setMapRevision(5n, 10n);
+    expect(store.getState().mapRevision).toBe(10n);
+    expect(store.getState().graphRevision).toBe(5n);
+
+    store.setMapRevision(6n, 8n); // lower map revision — drop map, still allow graph bump
+    expect(store.getState().mapRevision).toBe(10n);
+    expect(store.getState().graphRevision).toBe(6n);
+
+    store.setMapRevision(6n, 10n); // equal map revision — no-op for map
+    expect(store.getState().mapRevision).toBe(10n);
+
+    store.setMapRevision(7n, 11n); // higher — accept
+    expect(store.getState().mapRevision).toBe(11n);
+    expect(store.getState().graphRevision).toBe(7n);
+  });
+
+  it("clears keyframes when MarkerArray is empty", async () => {
+    const MARKER_ARRAY_SCHEMA = `
+visualization_msgs/Marker[] markers
+================================================================================
+MSG: visualization_msgs/Marker
+std_msgs/Header header
+string ns
+int32 id
+int32 type
+int32 action
+geometry_msgs/Pose pose
+geometry_msgs/Vector3 scale
+std_msgs/ColorRGBA color
+builtin_interfaces/Duration lifetime
+bool frame_locked
+geometry_msgs/Point[] points
+std_msgs/ColorRGBA[] colors
+string text
+string mesh_resource
+bool mesh_use_embedded_materials
+${HEADER_DEFS}
+================================================================================
+MSG: geometry_msgs/Pose
+geometry_msgs/Point position
+geometry_msgs/Quaternion orientation
+================================================================================
+MSG: geometry_msgs/Point
+float64 x
+float64 y
+float64 z
+================================================================================
+MSG: geometry_msgs/Quaternion
+float64 x
+float64 y
+float64 z
+float64 w
+================================================================================
+MSG: geometry_msgs/Vector3
+float64 x
+float64 y
+float64 z
+================================================================================
+MSG: std_msgs/ColorRGBA
+float32 r
+float32 g
+float32 b
+float32 a
+================================================================================
+MSG: builtin_interfaces/Duration
+int32 sec
+uint32 nanosec
+`;
+    const channel = makeChannel(
+      80,
+      "/orb_slam3/keyframes",
+      "visualization_msgs/msg/MarkerArray",
+      MARKER_ARRAY_SCHEMA,
+    );
+    const ws = await openAndAdvertise([channel]);
+    const sub = parseSubscribeOps(ws).find((s) => s.channelId === 80)!;
+
+    const withMarkers = {
+      markers: [
+        {
+          header: { stamp: { sec: 1, nanosec: 0 }, frame_id: "orb_map" },
+          ns: "kf",
+          id: 0,
+          type: 1,
+          action: 0,
+          pose: poseAt(1, 2, 0),
+          scale: { x: 1, y: 1, z: 1 },
+          color: { r: 1, g: 0, b: 0, a: 1 },
+          lifetime: { sec: 0, nanosec: 0 },
+          frame_locked: false,
+          points: [],
+          colors: [],
+          text: "",
+          mesh_resource: "",
+          mesh_use_embedded_materials: false,
+        },
+      ],
+    };
+    ws.deliverMessageData(sub.id, 1n, serialize(MARKER_ARRAY_SCHEMA, withMarkers));
+    await waitForState(store, (s) => s.keyframes.length === 1);
+    expect(store.getState().keyframes[0]).toMatchObject({ x: 1, y: 2 });
+
+    const empty = { markers: [] };
+    ws.deliverMessageData(sub.id, 2n, serialize(MARKER_ARRAY_SCHEMA, empty));
+    await waitForState(store, (s) => s.keyframes.length === 0);
+    expect(store.getState().keyframes).toEqual([]);
+  });
+
   it("revokes previous tracking image object URLs when replaced", async () => {
     const COMPRESSED_IMAGE_SCHEMA = `
 std_msgs/Header header
