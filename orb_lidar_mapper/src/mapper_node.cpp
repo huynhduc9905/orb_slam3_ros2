@@ -453,7 +453,12 @@ void MapperNode::publishCorrectedPath(std::shared_ptr<const TrajectoryRevision> 
 
   for (const auto& sp : revision->scans) {
     geometry_msgs::msg::PoseStamped ps;
-    ps.header = hdr;
+    ps.header.frame_id = map_frame_;
+    // Per-pose stamp from the scan's own timestamp so downstream consumers can
+    // match poses across runs by time; the message-level header carries publish
+    // time and frame. sp.stamp_ns is nanoseconds since epoch.
+    ps.header.stamp.sec     = static_cast<int32_t>(sp.stamp_ns / 1'000'000'000LL);
+    ps.header.stamp.nanosec = static_cast<uint32_t>(sp.stamp_ns % 1'000'000'000LL);
     ps.pose.position.x  = sp.pose.x;
     ps.pose.position.y  = sp.pose.y;
     ps.pose.orientation.w = std::cos(sp.pose.yaw * 0.5);

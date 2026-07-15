@@ -287,6 +287,42 @@ TEST_F(MapperNodeTest, OkTrackingProducesMapRevision1WithOccupiedAndFreeCells) {
 }
 
 // ---------------------------------------------------------------------------
+// Corrected path poses must carry their own per-scan timestamp, not the
+// single publish-time header stamp (needed for time-based cross-run matching).
+// ---------------------------------------------------------------------------
+TEST_F(MapperNodeTest, CorrectedPathPosesCarryPerScanStamps) {
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  graph_pub_->publish(make_graph(2, 1, 1));
+  spinFlush(mapper_, helper_, 300ms);
+
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 300ms);
+  // A new graph revision after the scan is committed republishes the corrected
+  // path, now containing the committed scan pose. (Same-revision snapshots are
+  // deduplicated, so bump the revision.)
+  graph_pub_->publish(make_graph(2, 2, 1));
+  bool ok = spinUntil2(mapper_, helper_,
+    [this] { return last_corr_path_ && !last_corr_path_->poses.empty(); });
+  ASSERT_TRUE(ok) << "Timed out waiting for corrected path with poses";
+
+  // The committed scan was stamped at t=2s; its pose must reflect that, not the
+  // (much larger) publish wall-clock time carried by the path header.
+  const auto& ps = last_corr_path_->poses.front();
+  EXPECT_EQ(ps.header.frame_id, "orb_map");
+  EXPECT_EQ(ps.header.stamp.sec, 2)
+      << "corrected path pose should carry its per-scan stamp (2s), got "
+      << ps.header.stamp.sec;
+  // Distinct poses at different scan times must have distinct stamps: the path
+  // header stamp (publish time) must differ from the per-pose stamp.
+  EXPECT_NE(ps.header.stamp.sec, last_corr_path_->header.stamp.sec)
+      << "per-pose stamp must differ from publish-time header stamp";
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: LOST tracking freezes map; provisional scan marker appears
 // ---------------------------------------------------------------------------
 TEST_F(MapperNodeTest, LostTrackingFreezesMapAndShowsProvisionalScanMarker) {
