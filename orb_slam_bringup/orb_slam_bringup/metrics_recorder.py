@@ -569,6 +569,124 @@ def build_live_stereo_section(
 STEREO_PAIR_TOLERANCE_S = 0.01
 
 
+def match_stereo_stamps(
+    left_stamps: Sequence[float],
+    right_stamps: Sequence[float],
+    tolerance_s: float = STEREO_PAIR_TOLERANCE_S,
+) -> int:
+    """Greedy nearest-match stereo pairing; each right stamp used at most once.
+
+    Mirrors the controller-verified offline algorithm (bisect + first unused
+    right within [lt-tol, lt+tol]). Deterministic and independent of live QoS.
+    """
+    import bisect
+
+    if not left_stamps or not right_stamps:
+        return 0
+    R = sorted(float(t) for t in right_stamps)
+    used = [False] * len(R)
+    pairs = 0
+    tol = float(tolerance_s)
+    for lt in left_stamps:
+        lt = float(lt)
+        i = bisect.bisect_left(R, lt - tol)
+        while i < len(R) and R[i] <= lt + tol:
+            if not used[i]:
+                used[i] = True
+                pairs += 1
+                break
+            i += 1
+    return pairs
+
+
+def count_stereo_pairs_from_bag(
+    bag_path: str | Path,
+    left_info_topic: str,
+    right_info_topic: str,
+    tolerance_s: float = STEREO_PAIR_TOLERANCE_S,
+    expected: int = 6633,
+) -> Tuple[int, int, int]:
+    """Count stereo CameraInfo pairs from an immutable bag (offline, deterministic).
+
+    Reads only the two CameraInfo topics' header stamps via rosbag2_py, then
+    runs :func:`match_stereo_stamps`. Lazy-imports rosbag2_py so unit tests that
+    never touch bags do not require it.
+
+    Returns (paired_count, left_count, right_count).
+    ``expected`` is unused for counting (kept for API symmetry / callers); the
+    gate still divides paired_count by its own expected_pairs elsewhere.
+    """
+    del expected  # not used for counting — gate uses expected_pairs separately
+    # Lazy import: pure unit tests must not require rosbag2_py.
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+
+    bag_path = Path(bag_path)
+    if not bag_path.exists():
+        raise FileNotFoundError(f"bag path not found: {bag_path}")
+
+    storage_id = "mcap"
+    # Infer storage from metadata or file extension when possible.
+    meta = bag_path / "metadata.yaml"
+    if meta.is_file():
+        try:
+            import yaml
+
+            md = yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+            info = md.get("rosbag2_bagfile_information") or md
+            sid = info.get("storage_identifier") or info.get("storage_id")
+            if sid:
+                storage_id = str(sid)
+        except Exception:  # noqa: BLE001
+            pass
+    elif bag_path.suffix == ".db3":
+        storage_id = "sqlite3"
+    elif bag_path.suffix == ".mcap":
+        storage_id = "mcap"
+
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(bag_path), storage_id=storage_id),
+        rosbag2_py.ConverterOptions(
+            input_serialization_format="cdr",
+            output_serialization_format="cdr",
+        ),
+    )
+    topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    if left_info_topic not in topic_types or right_info_topic not in topic_types:
+        # Topics absent → zero counts (genuine missing stereo must fail the gate).
+        return 0, 0, 0
+
+    left_type = get_message(topic_types[left_info_topic])
+    right_type = get_message(topic_types[right_info_topic])
+    # Filter to the two CameraInfo topics only.
+    try:
+        from rosbag2_py import StorageFilter
+
+        reader.set_filter(
+            StorageFilter(topics=[left_info_topic, right_info_topic])
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    left_stamps: List[float] = []
+    right_stamps: List[float] = []
+    while reader.has_next():
+        topic, data, _t = reader.read_next()
+        if topic == left_info_topic:
+            msg = deserialize_message(data, left_type)
+            stamp = msg.header.stamp
+            left_stamps.append(float(stamp.sec) + float(stamp.nanosec) * 1e-9)
+        elif topic == right_info_topic:
+            msg = deserialize_message(data, right_type)
+            stamp = msg.header.stamp
+            right_stamps.append(float(stamp.sec) + float(stamp.nanosec) * 1e-9)
+
+    paired = match_stereo_stamps(left_stamps, right_stamps, tolerance_s=tolerance_s)
+    return paired, len(left_stamps), len(right_stamps)
+
+
 @dataclass
 class StereoPairCounter:
     """Count stereo pairs by matching left/right CameraInfo (or image) stamps.
@@ -843,18 +961,20 @@ class MetricsRecorderNode:
         if self._expected_pairs <= 0:
             self._expected_pairs = 6633
 
-        left_info_topic = (
+        self._left_info_topic = (
             n.get_parameter("left_camera_info_topic")
             .get_parameter_value()
             .string_value
             or "/camera/camera/infra1/camera_info"
         )
-        right_info_topic = (
+        self._right_info_topic = (
             n.get_parameter("right_camera_info_topic")
             .get_parameter_value()
             .string_value
             or "/camera/camera/infra2/camera_info"
         )
+        left_info_topic = self._left_info_topic
+        right_info_topic = self._right_info_topic
 
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self._artifact_dir / "events.jsonl"
@@ -1262,7 +1382,8 @@ class MetricsRecorderNode:
         git = capture_git_info(repo)
 
         # Stereo section — fail closed: report observed pairs only.
-        # Live CameraInfo stamps drive pairing; profile YAML is display-only.
+        # Pair COUNT source of truth is the immutable bag (offline, deterministic).
+        # Live CameraInfo is kept only for camera_validated (geometry check).
         for p in config_paths:
             try:
                 import yaml
@@ -1288,14 +1409,48 @@ class MetricsRecorderNode:
             width = self._live_width
             height = self._live_height
             baseline_m = self._live_baseline_m
+
+        # Bag-offline pair count replaces lossy live subscription as gate input.
+        paired_count = self._stereo_pairs.paired_count
+        stereo_measured = self._stereo_pairs.streams_seen or self._camera_validated
+        bag_for_stereo = Path(self._bag_path) if self._bag_path else None
+        if bag_for_stereo is not None and bag_for_stereo.exists():
+            try:
+                bag_paired, bag_left, bag_right = count_stereo_pairs_from_bag(
+                    bag_for_stereo,
+                    self._left_info_topic,
+                    self._right_info_topic,
+                    tolerance_s=STEREO_PAIR_TOLERANCE_S,
+                    expected=self._expected_pairs,
+                )
+                paired_count = bag_paired
+                # Bag read succeeded → pair count is measured (even if 0 pairs).
+                stereo_measured = True
+                try:
+                    self._node.get_logger().info(
+                        f"stereo pairs from bag: {bag_paired}/"
+                        f"{self._expected_pairs} "
+                        f"(left={bag_left}, right={bag_right})"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                # Bag unreadable → keep live count / fail-closed (do not invent).
+                try:
+                    self._node.get_logger().warning(
+                        f"bag stereo count failed, falling back to live: {exc}"
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
         stereo = build_live_stereo_section(
             expected_pairs=self._expected_pairs,
-            paired_count=self._stereo_pairs.paired_count,
+            paired_count=paired_count,
             width=width,
             height=height,
             baseline_m=baseline_m,
             camera_validated=self._camera_validated,
-            measured=self._stereo_pairs.streams_seen or self._camera_validated,
+            measured=stereo_measured,
         )
 
         # Final map export

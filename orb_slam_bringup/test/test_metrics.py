@@ -489,6 +489,45 @@ def test_stereo_pair_counter_partial_match():
     assert c.right_count == 10
 
 
+def test_match_stereo_stamps_full_match():
+    """100 matched stamps within 10 ms → 100 pairs (bag offline algorithm)."""
+    from orb_slam_bringup.metrics_recorder import match_stereo_stamps
+
+    left = [i * 0.033 for i in range(100)]
+    right = [t + 0.002 for t in left]  # 2 ms offset
+    assert match_stereo_stamps(left, right, tolerance_s=0.01) == 100
+
+
+def test_match_stereo_stamps_offset_by_one_second():
+    """All right stamps shifted past the left span → 0 pairs."""
+    from orb_slam_bringup.metrics_recorder import match_stereo_stamps
+
+    # Compact burst of left stamps; rights all start 1 s after the last left
+    # so no left/right pair is within 10 ms.
+    left = [i * 0.033 for i in range(50)]  # ~0 .. 1.617 s
+    right = [t + 2.0 for t in left]  # ~2.0 .. 3.617 s — no overlap
+    assert match_stereo_stamps(left, right, tolerance_s=0.01) == 0
+
+
+def test_match_stereo_stamps_partial_overlap():
+    """Partial temporal overlap → only overlapping stamps pair; each right used once."""
+    from orb_slam_bringup.metrics_recorder import match_stereo_stamps
+
+    # left: 0..9, right: 5..14 (5 s overlap of 5 frames at integer stamps)
+    left = [float(i) for i in range(10)]
+    right = [float(i) for i in range(5, 15)]
+    assert match_stereo_stamps(left, right, tolerance_s=0.01) == 5
+
+
+def test_match_stereo_stamps_each_right_used_once():
+    """Greedy nearest-match must not double-claim a right stamp."""
+    from orb_slam_bringup.metrics_recorder import match_stereo_stamps
+
+    left = [0.0, 0.001, 0.002]
+    right = [0.0]  # only one right within tol of all three lefts
+    assert match_stereo_stamps(left, right, tolerance_s=0.01) == 1
+
+
 def test_validate_camera_info_matching_profile():
     """Live CameraInfo matching profile → validated True."""
     from orb_slam_bringup.metrics_recorder import validate_camera_info
