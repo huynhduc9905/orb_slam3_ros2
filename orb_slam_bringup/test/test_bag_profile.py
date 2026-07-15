@@ -79,14 +79,33 @@ def load_bridge_config() -> dict:
 
 
 def test_read_only_bridge_locks_down_capabilities():
-    """foxglove_bridge must be read-only: empty caps/whitelists, approved topics only."""
+    """foxglove_bridge must be read-only: no real caps/write-whitelists, approved topics only.
+
+    Empty lockdown lists must be typed as string arrays (e.g. [""]) so rclcpp can
+    load them; bare [] crashes foxglove_bridge. Security property: no non-empty
+    entry (so capabilities: ["clientPublish"] fails this test).
+    """
     cfg = load_bridge_config()
     params = cfg["foxglove_bridge"]["ros__parameters"]
 
-    assert params["capabilities"] == []
-    assert params["service_whitelist"] == []
-    assert params["param_whitelist"] == []
-    assert params["client_topic_whitelist"] == []
+    for key in (
+        "capabilities",
+        "service_whitelist",
+        "param_whitelist",
+        "client_topic_whitelist",
+    ):
+        values = params[key]
+        assert isinstance(values, list), f"{key} must be a list"
+        # Security: no real capability / write-whitelist name (would FAIL on
+        # e.g. capabilities: ["clientPublish"]).
+        assert [c for c in values if c] == [], (
+            f"{key} must contain no non-empty entries (read-only); got {values!r}"
+        )
+        # Typing: bare [] crashes foxglove_bridge (rclcpp cannot infer type);
+        # require the verified empty string-array form.
+        assert values == [""], (
+            f"{key} must be [\"\"] so rclcpp types it as string[]; got {values!r}"
+        )
 
     topic_whitelist = params["topic_whitelist"]
     assert topic_whitelist == APPROVED_TOPIC_WHITELIST
