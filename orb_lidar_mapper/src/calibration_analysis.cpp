@@ -1,10 +1,12 @@
 #include "orb_lidar_mapper/calibration_analysis.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <numeric>
 #include <random>
+#include <set>
 #include <utility>
 
 #include <pcl/kdtree/kdtree_flann.h>
@@ -199,20 +201,37 @@ double sharpnessScore(const std::vector<DeskewedScan>& scans,
     clouds[scan.sector]->width = static_cast<std::uint32_t>(clouds[scan.sector]->points.size());
     clouds[scan.sector]->height = 1;
   }
+  std::array<pcl::PointCloud<pcl::PointXYZ>::Ptr, 8> comparison_clouds;
+  std::array<pcl::KdTreeFLANN<pcl::PointXYZ>, 8> comparison_trees;
+  std::array<bool, 8> has_comparison{};
+  for (std::size_t source_sector = 0; source_sector < 8; ++source_sector) {
+    comparison_clouds[source_sector] =
+      std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    for (std::size_t target_sector = 0; target_sector < 8; ++target_sector) {
+      const std::size_t separation = (target_sector + 8 - source_sector) % 8;
+      if (target_sector == source_sector || separation == 1 || separation == 7) continue;
+      comparison_clouds[source_sector]->points.insert(
+        comparison_clouds[source_sector]->points.end(),
+        clouds[target_sector]->points.begin(), clouds[target_sector]->points.end());
+    }
+    auto& comparison = comparison_clouds[source_sector];
+    comparison->width = static_cast<std::uint32_t>(comparison->points.size());
+    comparison->height = 1;
+    if (!comparison->empty()) {
+      comparison_trees[source_sector].setInputCloud(comparison);
+      has_comparison[source_sector] = true;
+    }
+  }
   std::vector<double> residuals;
   for (std::size_t source_sector = 0; source_sector < 8; ++source_sector) {
+    if (!has_comparison[source_sector]) continue;
     for (const auto& point : clouds[source_sector]->points) {
-      double nearest = std::numeric_limits<double>::infinity();
-      for (std::size_t target_sector = 0; target_sector < 8; ++target_sector) {
-        const std::size_t separation = (target_sector + 8 - source_sector) % 8;
-        if (target_sector == source_sector || separation == 1 || separation == 7 || clouds[target_sector]->empty()) continue;
-        pcl::KdTreeFLANN<pcl::PointXYZ> tree;
-        tree.setInputCloud(clouds[target_sector]);
-        std::vector<int> indices(1);
-        std::vector<float> distances(1);
-        if (tree.nearestKSearch(point, 1, indices, distances) > 0) nearest = std::min(nearest, std::sqrt(static_cast<double>(distances[0])));
+      std::vector<int> indices(1);
+      std::vector<float> distances(1);
+      if (comparison_trees[source_sector].nearestKSearch(
+            point, 1, indices, distances) > 0) {
+        residuals.push_back(std::sqrt(static_cast<double>(distances[0])));
       }
-      if (std::isfinite(nearest)) residuals.push_back(nearest);
     }
   }
   if (residuals.size() < 5) return std::numeric_limits<double>::infinity();
@@ -235,13 +254,6 @@ const SharpnessPoint* minimumPoint(const std::vector<SharpnessPoint>& points) {
   const SharpnessPoint* best = nullptr;
   for (const auto& point : points) if (std::isfinite(point.score) && (!best || point.score < best->score)) best = &point;
   return best;
-}
-
-double gridScoreAt(const std::vector<SharpnessPoint>& points, double offset) {
-  const auto it = std::min_element(points.begin(), points.end(), [offset](const auto& a, const auto& b) {
-    return std::abs(a.offset_m - offset) < std::abs(b.offset_m - offset);
-  });
-  return it == points.end() || std::abs(it->offset_m - offset) > 1e-7 ? std::numeric_limits<double>::infinity() : it->score;
 }
 
 }  // namespace
@@ -282,8 +294,8 @@ SharpnessResult evaluateMapSharpness(
     result.rejection_reason = "sharpness_non_unique";
     return result;
   }
-  const double left = gridScoreAt(result.refined, best->offset_m - 0.020);
-  const double right = gridScoreAt(result.refined, best->offset_m + 0.020);
+  const double left = sharpnessScore(scans, odom, best->offset_m - 0.020);
+  const double right = sharpnessScore(scans, odom, best->offset_m + 0.020);
   if (!std::isfinite(left) || !std::isfinite(right) ||
       best->score > left * 0.97 || best->score > right * 0.97) {
     result.rejection_reason = "sharpness_not_three_percent_sharper";
@@ -302,7 +314,15 @@ AggregateResult classifyCalibration(
   double recorded_offset_m) {
   AggregateResult result;
   std::vector<const MethodEstimate*> reliable;
-  for (const auto& estimate : estimates) if (estimate.reliable) reliable.push_back(&estimate);
+  std::set<DeskewMethod> reliable_methods;
+  for (const auto& estimate : estimates) {
+    if (!estimate.reliable) continue;
+    if (!reliable_methods.insert(estimate.method).second) {
+      result.reason = "duplicate_method_estimate";
+      return result;
+    }
+    reliable.push_back(&estimate);
+  }
   if (reliable.size() < 2) {
     result.reason = "insufficient_reliable_methods";
     return result;

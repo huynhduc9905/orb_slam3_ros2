@@ -36,9 +36,10 @@ std::vector<CenterSample> samplesAround(double center, double spread,
   return samples;
 }
 
-MethodEstimate methodFixture(double offset) {
+MethodEstimate methodFixture(double offset,
+                             DeskewMethod method = DeskewMethod::kOdom) {
   MethodEstimate result;
-  result.method = DeskewMethod::kOdom;
+  result.method = method;
   result.reliable = true;
   result.center_x_m = offset;
   result.forward_offset_m = offset;
@@ -49,6 +50,15 @@ MethodEstimate methodFixture(double offset) {
   result.median_rmse_m = 0.01;
   result.median_overlap = 0.8;
   return result;
+}
+
+TEST(CalibrationAnalysis, DuplicateMethodRowsDoNotSatisfyTwoMethodGate) {
+  const auto result = classifyCalibration(
+    {methodFixture(0.260), methodFixture(0.261)},
+    SharpnessResult{true, 0.260, {}, {}, {}}, 0.260);
+
+  EXPECT_EQ(result.classification, ResultClass::kInconclusive);
+  EXPECT_EQ(result.reason, "duplicate_method_estimate");
 }
 
 TEST(CalibrationAnalysis, RejectsOutliersButPreservesRawRows) {
@@ -85,48 +95,66 @@ TEST(CalibrationAnalysis, BootstrapIsDeterministicAndCountsRejections) {
 }
 
 TEST(CalibrationAnalysis, SharpnessUsesExactGridsAndFindsUniqueMinimum) {
+  constexpr double kTrueOffset = 0.261;
   RotationDataset dataset;
   std::vector<DeskewedScan> scans;
   TimedPoseBuffer odom(10000000000LL, 1000000000LL);
-  for (std::size_t i = 0; i < 12; ++i) {
+  const std::vector<Point2> world_points{
+    {-2.4, -1.1}, {-1.7, 0.2}, {-1.2, 2.3}, {-0.4, -2.0},
+    {0.1, 0.7}, {0.8, -1.4}, {1.3, 2.1}, {2.0, -0.3},
+    {2.7, 1.4}, {3.2, -1.8}, {-2.8, 1.6}, {1.9, 0.9},
+  };
+  for (std::size_t i = 0; i < 16; ++i) {
     const auto stamp = static_cast<std::int64_t>(i) * 100000000LL;
-    odom.push({stamp, {0.0, 0.0, 0.2 * static_cast<double>(i)}});
+    const Pose2 base_pose{0.0, 0.0, 2.0 * kPi * static_cast<double>(i) / 16.0};
+    odom.push({stamp, base_pose});
     DeskewedScan scan;
     scan.scan_id = i;
     scan.reference_stamp_ns = stamp;
     scan.method = DeskewMethod::kOdom;
-    for (std::size_t j = 0; j < 20; ++j) {
-      const double angle = 2.0 * kPi * static_cast<double>(j) / 20.0;
-      scan.points.push_back({0.26 + std::cos(angle), std::sin(angle)});
+    const Pose2 lidar_to_world = base_pose * Pose2{kTrueOffset, 0.0, kPi};
+    const Pose2 world_to_lidar = lidar_to_world.inverse();
+    for (const auto& point : world_points) {
+      const double c = std::cos(world_to_lidar.yaw);
+      const double s = std::sin(world_to_lidar.yaw);
+      scan.points.push_back({world_to_lidar.x + c * point.x - s * point.y,
+                             world_to_lidar.y + s * point.x + c * point.y});
     }
     scans.push_back(scan);
   }
-  const auto result = evaluateMapSharpness(dataset, scans, odom, 0.26);
+  const auto result = evaluateMapSharpness(dataset, scans, odom, kTrueOffset);
   EXPECT_EQ(result.coarse.size(), 81u);
   EXPECT_FALSE(result.refined.empty());
-  EXPECT_GE(result.best_offset_m, 0.18);
-  EXPECT_LE(result.best_offset_m, 0.34);
+  EXPECT_TRUE(result.reliable) << result.rejection_reason;
+  EXPECT_NEAR(result.best_offset_m, kTrueOffset, 0.0003);
 }
 
 TEST(CalibrationAnalysis, ClassifiesConsistentOffsetErrorAndDisagreement) {
   const auto sharp = SharpnessResult{true, 0.260, {}, {}, {}};
   EXPECT_EQ(classifyCalibration(
-              {methodFixture(0.257), methodFixture(0.260), methodFixture(0.262)},
+              {methodFixture(0.257, DeskewMethod::kOdom),
+               methodFixture(0.260, DeskewMethod::kImu),
+               methodFixture(0.262, DeskewMethod::kExistingScan)},
               sharp, 0.260).classification,
             ResultClass::kConsistent);
   EXPECT_EQ(classifyCalibration(
-              {methodFixture(0.230), methodFixture(0.232), methodFixture(0.234)},
+              {methodFixture(0.230, DeskewMethod::kOdom),
+               methodFixture(0.232, DeskewMethod::kImu),
+               methodFixture(0.234, DeskewMethod::kExistingScan)},
               SharpnessResult{true, 0.232, {}, {}, {}}, 0.260).classification,
             ResultClass::kLikelyOffsetError);
   EXPECT_EQ(classifyCalibration(
-              {methodFixture(0.230), methodFixture(0.260), methodFixture(0.290)},
+              {methodFixture(0.230, DeskewMethod::kOdom),
+               methodFixture(0.260, DeskewMethod::kImu),
+               methodFixture(0.290, DeskewMethod::kExistingScan)},
               SharpnessResult{true, 0.260, {}, {}, {}}, 0.260).classification,
             ResultClass::kInconclusive);
 }
 
 TEST(CalibrationAnalysis, RecordsExactRecordedOffsetEquation) {
   const auto result = classifyCalibration(
-    {methodFixture(0.280), methodFixture(0.281)},
+    {methodFixture(0.280, DeskewMethod::kOdom),
+     methodFixture(0.281, DeskewMethod::kImu)},
     SharpnessResult{true, 0.280, {}, {}, {}}, 0.260);
   EXPECT_NEAR(result.consensus_offset_m, 0.2805, 0.002);
   EXPECT_NEAR(result.consensus_offset_m - 0.260, 0.0205, 0.002);
