@@ -49,7 +49,9 @@ add_library(${PROJECT_NAME}_calibration
   src/calibration_deskew.cpp
   src/planar_icp.cpp
   src/rotation_center_estimator.cpp
-  src/calibration_analysis.cpp)
+  src/calibration_analysis.cpp
+  src/calibration_pipeline.cpp
+  src/calibration_report.cpp)
 target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_calibration PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -68,6 +70,14 @@ ament_target_dependencies(${PROJECT_NAME}_node_exe rclcpp)
 set_target_properties(${PROJECT_NAME}_node_exe PROPERTIES
   OUTPUT_NAME orb_lidar_mapper_node)
 install(TARGETS ${PROJECT_NAME}_node_exe DESTINATION lib/${PROJECT_NAME})
+
+add_executable(lidar_rotation_center_check src/lidar_rotation_center_check.cpp)
+target_compile_features(lidar_rotation_center_check PUBLIC cxx_std_17)
+target_include_directories(lidar_rotation_center_check PRIVATE include)
+target_link_libraries(lidar_rotation_center_check ${PROJECT_NAME}_calibration)
+ament_target_dependencies(lidar_rotation_center_check
+  rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+install(TARGETS lidar_rotation_center_check DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -132,6 +142,18 @@ if(BUILD_TESTING)
   target_include_directories(calibration_analysis_test PRIVATE include)
   target_link_libraries(calibration_analysis_test ${PROJECT_NAME}_calibration)
   ament_target_dependencies(calibration_analysis_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_pipeline_test test/calibration_pipeline_test.cpp)
+  target_include_directories(calibration_pipeline_test PRIVATE include)
+  target_link_libraries(calibration_pipeline_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_pipeline_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_report_test test/calibration_report_test.cpp)
+  target_include_directories(calibration_report_test PRIVATE include)
+  target_link_libraries(calibration_report_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_report_test
     rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
 endif()
 

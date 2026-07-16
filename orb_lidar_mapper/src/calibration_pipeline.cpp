@@ -1,0 +1,232 @@
+#include "orb_lidar_mapper/calibration_pipeline.hpp"
+
+#include <cmath>
+#include <cstdint>
+#include <stdexcept>
+#include <unordered_map>
+#include <utility>
+
+#include "orb_lidar_mapper/calibration_deskew.hpp"
+
+namespace orb_lidar_mapper {
+namespace {
+
+constexpr std::int64_t kMinimumStableIntervalNs = 2'000'000'000LL;
+constexpr std::int64_t kPoseMaximumGapNs = 1'000'000'000LL;
+constexpr std::int64_t kAssociationDeviationNs = 100'000'000LL;
+constexpr double kPairMinYaw = 10.0 * kPi / 180.0;
+constexpr double kPairMaxYaw = 30.0 * kPi / 180.0;
+constexpr double kImuStartingOffset = 0.260;
+constexpr double kImuConvergenceThreshold = 0.0005;
+constexpr std::size_t kMaximumImuIterations = 8;
+
+using ScanMap = std::unordered_map<std::uint64_t, std::size_t>;
+
+TimedPoseBuffer makePoseBuffer(const RotationDataset& dataset) {
+  if (dataset.odom_poses.empty()) throw std::runtime_error("no odometry samples");
+  const auto retention = dataset.odom_poses.back().stamp_ns -
+                         dataset.odom_poses.front().stamp_ns + kPoseMaximumGapNs;
+  TimedPoseBuffer buffer(std::max<std::int64_t>(retention, kPoseMaximumGapNs),
+                         kPoseMaximumGapNs);
+  for (const auto& sample : dataset.odom_poses) {
+    if (!buffer.push(sample)) throw std::runtime_error("odometry timestamps are not monotonic");
+  }
+  return buffer;
+}
+
+std::vector<DeskewedScan> deskewOdom(const RotationDataset& dataset,
+                                     const TimedPoseBuffer& odom,
+                                     double range_cap_m) {
+  std::vector<DeskewedScan> result;
+  for (const auto& scan : dataset.raw_scans) {
+    const auto deskewed = deskewWithOdom(scan, odom, dataset.recorded_mount, range_cap_m);
+    if (deskewed && !deskewed->points.empty()) result.push_back(*deskewed);
+  }
+  return result;
+}
+
+std::vector<DeskewedScan> deskewExisting(const RotationDataset& dataset,
+                                         double range_cap_m) {
+  const auto associations = associateUndistortedScans(
+    dataset.raw_scans, dataset.undistorted_scans, kAssociationDeviationNs);
+  if (associations.empty()) return {};
+  ScanMap undistorted;
+  for (std::size_t index = 0; index < dataset.undistorted_scans.size(); ++index) {
+    undistorted[dataset.undistorted_scans[index].id] = index;
+  }
+  std::vector<DeskewedScan> result;
+  for (const auto& association : associations) {
+    const auto it = undistorted.find(association.undistorted_scan_id);
+    if (it == undistorted.end()) continue;
+    auto scan = adaptUndistortedScan(dataset.undistorted_scans[it->second], association, range_cap_m);
+    if (!scan.points.empty()) result.push_back(std::move(scan));
+  }
+  return result;
+}
+
+std::vector<DeskewedScan> deskewImu(const RotationDataset& dataset,
+                                    double offset, double range_cap_m) {
+  std::vector<DeskewedScan> result;
+  for (const auto& scan : dataset.raw_scans) {
+    const auto deskewed = deskewWithImu(
+      scan, dataset.imu_yaw_rates, offset, kPi, range_cap_m);
+    if (deskewed && !deskewed->points.empty()) result.push_back(*deskewed);
+  }
+  return result;
+}
+
+ScanMap indexById(const std::vector<DeskewedScan>& scans) {
+  ScanMap result;
+  for (std::size_t index = 0; index < scans.size(); ++index) result[scans[index].scan_id] = index;
+  return result;
+}
+
+std::vector<CenterSample> estimateSamples(
+  DeskewMethod method, const std::vector<DeskewedScan>& scans,
+  const std::vector<ScanPair>& schedule, const std::vector<std::uint64_t>& base_ids,
+  const PlanarIcp& icp, double max_center_x, double max_abs_center_y) {
+  std::vector<CenterSample> result;
+  const auto indices = indexById(scans);
+  result.reserve(schedule.size());
+  for (const auto& scheduled : schedule) {
+    CenterSample sample;
+    sample.method = method;
+    sample.yaw_sector = scheduled.yaw_sector;
+    sample.icp.rejection_reason = "preprocessing_failed";
+    if (scheduled.source_index >= base_ids.size() || scheduled.target_index >= base_ids.size()) {
+      sample.accepted = false;
+      sample.rejection_reason = "invalid_common_schedule";
+      result.push_back(std::move(sample));
+      continue;
+    }
+    sample.source_scan_id = base_ids[scheduled.source_index];
+    sample.target_scan_id = base_ids[scheduled.target_index];
+    const auto source = indices.find(sample.source_scan_id);
+    const auto target = indices.find(sample.target_scan_id);
+    if (source == indices.end() || target == indices.end()) {
+      sample.accepted = false;
+      sample.rejection_reason = "preprocessing_failed";
+      result.push_back(std::move(sample));
+      continue;
+    }
+    ScanPair pair{source->second, target->second, scheduled.yaw_sector,
+                  scheduled.odom_yaw_delta_rad};
+    sample = estimateRotationCenter(
+      method, pair, scans[source->second], scans[target->second], icp,
+      max_center_x, max_abs_center_y);
+    result.push_back(std::move(sample));
+  }
+  return result;
+}
+
+std::vector<std::uint64_t> orderedIds(const std::vector<DeskewedScan>& scans) {
+  std::vector<std::uint64_t> result;
+  result.reserve(scans.size());
+  for (const auto& scan : scans) result.push_back(scan.scan_id);
+  return result;
+}
+
+std::vector<ScanPair> commonSchedule(const std::vector<DeskewedScan>& base,
+                                     const TimedPoseBuffer& odom,
+                                     const std::vector<MotionInterval>& intervals) {
+  const auto base_pairs = selectCalibrationPairs(
+    base, odom, intervals, kPairMinYaw, kPairMaxYaw);
+  const auto ids = orderedIds(base);
+  ScanMap by_position;
+  for (std::size_t i = 0; i < ids.size(); ++i) by_position[ids[i]] = i;
+  std::vector<ScanPair> result;
+  result.reserve(base_pairs.size());
+  for (const auto& pair : base_pairs) result.push_back(pair);
+  return result;
+}
+
+MethodEstimate estimateMethod(const std::vector<CenterSample>& samples,
+                              DeskewMethod method) {
+  return robustMethodEstimate(method, samples);
+}
+
+}  // namespace
+
+CalibrationRun runCalibration(const CalibrationConfig& config) {
+  if (config.bag_path.empty() || config.output_dir.empty() ||
+      !std::isfinite(config.range_cap_m) || config.range_cap_m < 0.0 ||
+      !std::isfinite(config.min_abs_omega) || !std::isfinite(config.max_abs_omega) ||
+      !std::isfinite(config.max_abs_linear_speed)) {
+    throw std::invalid_argument("invalid calibration configuration");
+  }
+  CalibrationRun run;
+  run.config = config;
+  run.dataset = RotationBagReader::read(config.bag_path);
+  const auto odom = makePoseBuffer(run.dataset);
+  const auto intervals = selectStableRotationIntervals(
+    run.dataset, config.min_abs_omega, config.max_abs_omega,
+    config.max_abs_linear_speed, kMinimumStableIntervalNs);
+  if (intervals.empty()) throw std::runtime_error("no stable rotation interval");
+
+  const auto odom_scans = deskewOdom(run.dataset, odom, config.range_cap_m);
+  if (odom_scans.size() < 3) throw std::runtime_error("no usable odometry-deskewed scans");
+  const auto schedule = commonSchedule(odom_scans, odom, intervals);
+  if (schedule.empty()) throw std::runtime_error("no calibration scan pairs");
+  const auto base_ids = orderedIds(odom_scans);
+  PlanarIcp icp(config.icp);
+
+  const auto odom_samples = estimateSamples(
+    DeskewMethod::kOdom, odom_scans, schedule, base_ids, icp, 1.0, 0.25);
+  const auto existing_scans = deskewExisting(run.dataset, config.range_cap_m);
+  const auto existing_samples = estimateSamples(
+    DeskewMethod::kExistingScan, existing_scans, schedule, base_ids, icp, 1.0, 0.25);
+
+  double imu_offset = kImuStartingOffset;
+  std::vector<CenterSample> imu_samples;
+  MethodEstimate imu_estimate;
+  bool imu_converged = false;
+  for (std::size_t iteration = 0; iteration < kMaximumImuIterations; ++iteration) {
+    const auto imu_scans = deskewImu(run.dataset, imu_offset, config.range_cap_m);
+    imu_samples = estimateSamples(
+      DeskewMethod::kImu, imu_scans, schedule, base_ids, icp, 1.0, 0.25);
+    imu_estimate = estimateMethod(imu_samples, DeskewMethod::kImu);
+    if (imu_estimate.accepted_pairs == 0 || !std::isfinite(imu_estimate.forward_offset_m)) break;
+    const double updated = imu_estimate.forward_offset_m;
+    if (std::abs(updated - imu_offset) < kImuConvergenceThreshold) {
+      imu_offset = updated;
+      imu_converged = true;
+      break;
+    }
+    imu_offset = updated;
+  }
+  if (!imu_converged) {
+    imu_estimate.reliable = false;
+    imu_estimate.rejection_counts["imu_offset_not_converged"]++;
+    for (auto& sample : imu_samples) {
+      if (sample.accepted) {
+        sample.accepted = false;
+        sample.rejection_reason = "imu_offset_not_converged";
+      }
+    }
+  }
+
+  const auto existing_estimate = estimateMethod(existing_samples, DeskewMethod::kExistingScan);
+  const auto odom_estimate = estimateMethod(odom_samples, DeskewMethod::kOdom);
+  run.methods = {odom_estimate, imu_estimate, existing_estimate};
+  run.center_samples.reserve(odom_samples.size() + imu_samples.size() + existing_samples.size());
+  run.center_samples.insert(run.center_samples.end(), odom_samples.begin(), odom_samples.end());
+  run.center_samples.insert(run.center_samples.end(), imu_samples.begin(), imu_samples.end());
+  run.center_samples.insert(run.center_samples.end(), existing_samples.begin(), existing_samples.end());
+  const double consensus_hint = odom_estimate.reliable ? odom_estimate.forward_offset_m : kImuStartingOffset;
+  run.sharpness = evaluateMapSharpness(run.dataset, odom_scans, odom, consensus_hint);
+  run.aggregate = classifyCalibration(
+    {run.methods[0], run.methods[1], run.methods[2]}, run.sharpness,
+    run.dataset.recorded_mount.x_m);
+  return run;
+}
+
+int resultExitCode(ResultClass result) {
+  switch (result) {
+    case ResultClass::kConsistent: return 0;
+    case ResultClass::kLikelyOffsetError: return 2;
+    case ResultClass::kInconclusive: return 3;
+  }
+  return 3;
+}
+
+}  // namespace orb_lidar_mapper
