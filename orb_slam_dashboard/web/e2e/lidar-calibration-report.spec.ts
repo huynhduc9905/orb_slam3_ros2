@@ -69,6 +69,46 @@ test('actual calibration reports render scientific data and fail closed', async 
       await expect(row).toContainText(method.median_rmse_m.toFixed(3));
       await expect(row).toContainText(method.median_overlap.toFixed(3));
     }
+    if (await page.evaluate(() => window.innerWidth <= 600)) {
+      const mobileRows = await page.locator('#methods tr').evaluateAll(rows => rows.map(row => {
+        const rowRect = row.getBoundingClientRect();
+        const cells = Array.from(row.querySelectorAll('td')).map(cell => {
+          const rect = cell.getBoundingClientRect();
+          return {
+            label: cell.getAttribute('data-label'),
+            text: cell.textContent?.trim() ?? '',
+            left: rect.left,
+            right: rect.right,
+            width: rect.width,
+            rowLeft: rowRect.left,
+            rowRight: rowRect.right,
+          };
+        });
+        return { cells, rowLeft: rowRect.left, rowRight: rowRect.right };
+      }));
+      const labels = ['Method', 'Center x', 'Center y', 'Forward offset', 'Delta', '95% CI',
+        'Accepted/attempted', 'Sectors', 'RMSE', 'Overlap'];
+      expect(await page.locator('#methods').evaluate(table => ({
+        scrollWidth: table.scrollWidth,
+        clientWidth: table.clientWidth,
+      }))).toEqual(expect.objectContaining({ scrollWidth: expect.any(Number), clientWidth: expect.any(Number) }));
+      const tableMetrics = await page.locator('#methods').evaluate(table => ({
+        scrollWidth: table.scrollWidth,
+        clientWidth: table.clientWidth,
+      }));
+      expect(tableMetrics.scrollWidth).toBeLessThanOrEqual(tableMetrics.clientWidth + 1);
+      expect(mobileRows).toHaveLength(calibration.methods.length);
+      for (const row of mobileRows) {
+        expect(row.cells.map(cell => cell.label)).toEqual(labels);
+        expect(row.cells).toHaveLength(labels.length);
+        for (const cell of row.cells) {
+          expect(cell.text).not.toBe('');
+          expect(cell.left).toBeGreaterThanOrEqual(row.rowLeft - 1);
+          expect(cell.right).toBeLessThanOrEqual(row.rowRight + 1);
+          expect(cell.width).toBeLessThanOrEqual(row.rowRight - row.rowLeft + 1);
+        }
+      }
+    }
     for (const label of ['Odom', 'IMU', 'Existing /scan', 'Recorded center']) {
       await expect(page.locator('#center-legend')).toContainText(label);
     }
