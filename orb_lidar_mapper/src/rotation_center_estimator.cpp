@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 #include <Eigen/Core>
 #include <Eigen/LU>
@@ -14,8 +13,11 @@ bool inInterval(std::int64_t stamp, const MotionInterval& interval) {
   return stamp >= interval.start_ns && stamp <= interval.end_ns;
 }
 
-std::size_t sectorFor(double progress) {
-  const auto sector = static_cast<std::size_t>(std::floor(progress * 8.0));
+std::size_t sectorForYaw(double yaw) {
+  double heading = Pose2::normalizeAngle(yaw);
+  if (heading < 0.0) heading += 2.0 * kPi;
+  const auto sector = static_cast<std::size_t>(
+      std::floor(heading * 8.0 / (2.0 * kPi)));
   return std::min<std::size_t>(sector, 7U);
 }
 
@@ -55,17 +57,7 @@ std::vector<ScanPair> selectCalibrationPairs(
       const double delta = Pose2::normalizeAngle(target_pose->yaw - source_pose->yaw);
       const double absolute_delta = std::abs(delta);
       if (absolute_delta < min_yaw || absolute_delta > max_yaw) continue;
-      const auto interval_start = odom.interpolate(interval->start_ns);
-      const auto interval_end = odom.interpolate(interval->end_ns);
-      if (!interval_start || !interval_end) continue;
-      const double interval_yaw = Pose2::normalizeAngle(
-          interval_end->yaw - interval_start->yaw);
-      if (std::abs(interval_yaw) < std::numeric_limits<double>::epsilon()) continue;
-      const double progress = std::clamp(
-          Pose2::normalizeAngle(source_pose->yaw - interval_start->yaw) /
-              interval_yaw,
-          0.0, 1.0);
-      pairs.push_back({source, target, sectorFor(progress), delta});
+      pairs.push_back({source, target, sectorForYaw(source_pose->yaw), delta});
     }
   }
   return pairs;

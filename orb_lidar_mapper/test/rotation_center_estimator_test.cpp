@@ -1,4 +1,5 @@
 #include <cmath>
+#include <set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -57,6 +58,31 @@ TEST(RotationCenter, SelectsStablePairsAcrossYawSectors) {
     EXPECT_LT(pair.source_index, pair.target_index);
     EXPECT_LT(pair.yaw_sector, 8U);
   }
+}
+
+TEST(RotationCenter, MultiTurnIntervalStillCoversAbsoluteYawSectors) {
+  std::vector<DeskewedScan> scans;
+  TimedPoseBuffer odom(100'000'000'000LL, 100'000'000'000LL);
+  constexpr int kStepsPerTurn = 16;
+  constexpr int kTurns = 2;
+  for (int step = 0; step <= kStepsPerTurn * kTurns; ++step) {
+    const auto stamp = static_cast<std::int64_t>(step) * 100'000'000LL;
+    const double unwrapped_yaw = step * 2.0 * kPi / kStepsPerTurn;
+    scans.push_back(scan(static_cast<std::uint64_t>(step), stamp));
+    ASSERT_TRUE(odom.push(
+        {stamp, {0.0, 0.0, Pose2::normalizeAngle(unwrapped_yaw)}}));
+  }
+  const std::vector<MotionInterval> stable{
+      {0, kStepsPerTurn * kTurns * 100'000'000LL}};
+
+  const auto pairs = selectCalibrationPairs(scans, odom, stable,
+                                            20.0 * kPi / 180.0,
+                                            25.0 * kPi / 180.0);
+
+  ASSERT_FALSE(pairs.empty());
+  std::set<std::size_t> sectors;
+  for (const auto& pair : pairs) sectors.insert(pair.yaw_sector);
+  EXPECT_EQ(sectors.size(), 8U);
 }
 
 TEST(RotationCenter, RejectsPairsOutsideStableIntervals) {
