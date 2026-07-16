@@ -27,20 +27,24 @@ An independent, read-only calibration check was run against the immutable
 `/scan_origin`, 915 `/scan`, 1,827 `/odom`, and 18,289 `/imu` messages). The
 first fresh attempt at
 `artifacts/inplace-rotate-calibration-20260716` returned operational exit 1
-because `/imu` contains contiguous duplicate header timestamps; that empty
-directory was preserved and not reused. Approved commits `21f0a9f` and
+because `/imu` contains contiguous duplicate header timestamps; that failed
+output path was not reused. Approved commits `21f0a9f` and
 `b4849a1` changed only the reader and its tests so equal contiguous IMU stamps
 are combined by a finite-checked `long double` arithmetic mean, while strictly
 decreasing stamps still fail. The retry dataset therefore contains 8,569
 unique IMU timestamp groups.
 
-After rebuilding `b4849a1`, exactly one retry was run:
+After rebuilding `b4849a1`, the first successful scientific run wrote
+`artifacts/inplace-rotate-calibration-20260716-retry1` and returned scientific
+exit 3. It predates the mobile report-layout fix and remains unchanged. After
+approved generator commit `d4d344a`, exactly one additional immutable-bag run
+was made into a new path:
 
 ```bash
 source install/setup.bash
 ros2 run orb_lidar_mapper lidar_rotation_center_check \
   --bag /home/duc/robot/bag/inplace-rotate \
-  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry1"
+  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry2"
 ```
 
 No threshold options were supplied or tuned after seeing the output. All
@@ -68,14 +72,23 @@ sharpness sweep selected 0.23575000000000004 m with score
 offset is therefore only a candidate requiring explicit user approval and a
 better measurement before any application.
 
+Retry2 and retry1 have identical scientific content. Recursive JSON comparison
+found only the expected `configuration.output` path change; `centers.csv` and
+`sharpness.csv` are byte-for-byte identical. Thus every raw method value,
+sample, map, rejection counter, classification, and sharpness value above is
+unchanged by the report-layout generator fix.
+
 All four files (`calibration.json`, `centers.csv`, `sharpness.csv`, and
-`report.html`) are nonempty in the retry artifact. The exact real report was
+`report.html`) are nonempty in the retry2 artifact. The exact retry2 report was
 checked at 1440x900, 768x1024, and 390x844 with numeric JSON agreement,
 method/legend colors, signs, warning, map framing, and responsive containment;
-there were no browser errors or post-load network requests. The screenshots
-also show two presentation limitations: rejected placeholder centers lie
-outside the fixed scatter frame, and the small sharpness scores are compressed
-against the plot baseline. These do not upgrade the scientific result.
+there were no browser errors or post-load network requests. At 390x844, every
+one of the ten labels and exact values for each of the three methods is visible
+and contained in its stacked row, with no table or document horizontal
+overflow. Full screenshots were inspected. They still show two scientific
+presentation limitations: rejected placeholder centers lie outside the fixed
+scatter frame, and the small sharpness scores are compressed against the plot
+baseline. These do not upgrade the scientific result.
 
 No TF, URDF, source configuration, or bag data changed. Do not apply the
 0.23575 m candidate to TF/URDF without explicit user approval.
@@ -191,8 +204,9 @@ A fresh hardening replay used a clean ROS domain and wrote artifacts to:
 /home/duc/robot/src/orb_slam3_ros2/artifacts/direct-dashboard-hardening-run-20260716
 ```
 
-After the shutdown regression fix, the full suite was 321 tests with zero errors,
-failures, or skips, and all 11 checker gates passed. Stereo pairing was
+Current full-suite verification is 379 tests with zero errors, failures, or
+skips. At the earlier shutdown-regression replay milestone, all 11 checker
+gates passed. Stereo pairing was
 6633/6633 (ratio 1.0); tracking initialized with OK ratio 1.0, loop count 1,
 zero invalid poses, and no deadlock. The final map was 512x448 at
 0.05000000074505806 m resolution, with 80744 free and 5830 occupied cells.
