@@ -20,6 +20,66 @@ The user viewed the custom dashboard during a fresh replay and reported that the
 
 Do **not** redesign this as an IMU integration task. The user explicitly chose this conservative wheel + two-visual-anchor approach. The Handsfree and D435i IMU paths remain out of scope unless separately requested.
 
+## Offline Rotation-Center Calibration Result
+
+An independent, read-only calibration check was run against the immutable
+`/home/duc/robot/bag/inplace-rotate` MCAP (91.353939991 seconds; 915
+`/scan_origin`, 915 `/scan`, 1,827 `/odom`, and 18,289 `/imu` messages). The
+first fresh attempt at
+`artifacts/inplace-rotate-calibration-20260716` returned operational exit 1
+because `/imu` contains contiguous duplicate header timestamps; that empty
+directory was preserved and not reused. Approved commits `21f0a9f` and
+`b4849a1` changed only the reader and its tests so equal contiguous IMU stamps
+are combined by a finite-checked `long double` arithmetic mean, while strictly
+decreasing stamps still fail. The retry dataset therefore contains 8,569
+unique IMU timestamp groups.
+
+After rebuilding `b4849a1`, exactly one retry was run:
+
+```bash
+source install/setup.bash
+ros2 run orb_lidar_mapper lidar_rotation_center_check \
+  --bag /home/duc/robot/bag/inplace-rotate \
+  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry1"
+```
+
+No threshold options were supplied or tuned after seeing the output. All
+predeclared gates stayed unchanged: angular speed 0.15–0.45 rad/s, linear
+speed at most 0.02 m/s, pair separation 10–30 degrees, overlap at least 0.40,
+ICP RMSE at most 0.05 m, ICP/odom yaw error at most 2 degrees, and the existing
+reliability, plausibility, consensus, and sharpness gates.
+
+The tool returned accepted scientific exit 3, `INCONCLUSIVE`, with aggregate
+reason `insufficient_reliable_methods`. The recorded center is
+`(0.260, 0.000) m`. Every raw method field and rejection counter is:
+
+| Method | Center x/y (m) | Forward/delta (m) | 95% CI x (m) | Pairs | Sectors | RMSE/overlap | Rejections |
+|---|---|---|---|---:|---:|---|---|
+| Odom | 0.000 / 0.000 | 0.000 / -0.260 | [0.000, 0.000] | 0/512 | 0 | 0.000 / 0.000 | yaw disagreement 301; insufficient overlap 211; no accepted pairs 1 |
+| IMU | 0.000 / 0.000 | 0.000 / -0.260 | [0.000, 0.000] | 0/512 | 0 | 0.000 / 0.000 | yaw disagreement 302; insufficient overlap 210; no accepted pairs 1 |
+| Existing `/scan` | 0.000 / 0.000 | 0.000 / -0.260 | [0.000, 0.000] | 0/512 | 0 | 0.000 / 0.000 | yaw disagreement 281; insufficient overlap 231; no accepted pairs 1 |
+
+The raw zero method values, zero-width confidence intervals, and aggregate
+consensus/CI of `0.000 / [0.000, 0.000] m` are fail-closed placeholders after
+all 1,536 pairs were rejected; they are not measured centers. The independent
+sharpness sweep selected 0.23575000000000004 m with score
+0.0011207191715077018, but it was rejected as
+`sharpness_not_three_percent_sharper`. Its -0.02425 m delta from the recorded
+offset is therefore only a candidate requiring explicit user approval and a
+better measurement before any application.
+
+All four files (`calibration.json`, `centers.csv`, `sharpness.csv`, and
+`report.html`) are nonempty in the retry artifact. The exact real report was
+checked at 1440x900, 768x1024, and 390x844 with numeric JSON agreement,
+method/legend colors, signs, warning, map framing, and responsive containment;
+there were no browser errors or post-load network requests. The screenshots
+also show two presentation limitations: rejected placeholder centers lie
+outside the fixed scatter frame, and the small sharpness scores are compressed
+against the plot baseline. These do not upgrade the scientific result.
+
+No TF, URDF, source configuration, or bag data changed. Do not apply the
+0.23575 m candidate to TF/URDF without explicit user approval.
+
 ## Current Mapper Behavior
 
 ### Accepted normal scans

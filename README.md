@@ -50,6 +50,54 @@ colcon test-result --verbose
 
 Current full-suite result: **321 tests, 0 errors, 0 failures, 0 skipped**.
 
+## Offline lidar rotation-center check
+
+The read-only calibration tool compares odometry-deskewed `/scan_origin`,
+IMU-deskewed `/scan_origin`, and the existing `/scan` output without playing
+the bag or changing runtime state:
+
+```bash
+source install/setup.bash
+ros2 run orb_lidar_mapper lidar_rotation_center_check \
+  --bag /home/duc/robot/bag/inplace-rotate \
+  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry1"
+```
+
+The immutable MCAP fixture is 91.353939991 seconds long and contains 915 raw
+scans, 915 existing undistorted scans, 1,827 odometry messages, and 18,289 raw
+IMU messages. The first attempt at
+`artifacts/inplace-rotate-calibration-20260716` failed operationally because
+the bag contains contiguous duplicate IMU header stamps. The approved reader
+behavior now validates every finite angular-rate sample, averages only values
+sharing an equal contiguous stamp, and continues to reject decreasing stamps.
+That produced 8,569 unique IMU timestamps on the single fresh retry above.
+
+The retry used no threshold overrides. The predeclared defaults remained
+unchanged, including `0.15 <= |omega| <= 0.45 rad/s`, maximum linear speed
+`0.02 m/s`, 10–30 degree pair separation, minimum overlap 0.40, maximum ICP
+RMSE 0.05 m, and maximum ICP/odom yaw disagreement 2 degrees. It returned
+scientific exit 3 and classification `INCONCLUSIVE`:
+
+| Method | Center x/y (m) | 95% CI x (m) | Accepted/attempted | RMSE (m) | Overlap | Rejections |
+|---|---|---|---:|---:|---:|---|
+| Odom | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 301; insufficient overlap 211; no accepted pairs 1 |
+| IMU | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 302; insufficient overlap 210; no accepted pairs 1 |
+| Existing `/scan` | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 281; insufficient overlap 231; no accepted pairs 1 |
+
+Those zero method fields and the aggregate 0.000 m consensus are the raw
+fail-closed values emitted when no pair is accepted; they are not usable
+physical estimates. Each method reports forward offset 0.000 m, delta
+-0.260 m from the recorded 0.260 m center, zero covered yaw sectors, and is
+unreliable. The aggregate reason is `insufficient_reliable_methods`.
+
+The independent sharpness sweep has a raw minimum at 0.23575000000000004 m
+(score 0.0011207191715077018), 0.02425 m below the recorded offset, but it is
+also unreliable because it did not meet the predeclared 3% prominence gate
+(`sharpness_not_three_percent_sharper`). Treat 0.23575 m only as a candidate
+for further measurement that requires explicit user approval. No TF, URDF,
+bag data, or source configuration was changed, and this result does not
+authorize changing any mount transform.
+
 ## Full bag replay
 
 Immutable bag fixture: `/home/duc/robot/20260713_152907` (~221 s).
