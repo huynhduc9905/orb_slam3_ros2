@@ -175,7 +175,7 @@ TEST(CalibrationPipeline, RunsAllMethodsAndIteratesImuOffset) {
   ASSERT_EQ(run.methods.size(), 3U);
   for (const auto& method : run.methods) {
     EXPECT_TRUE(method.reliable) << static_cast<int>(method.method);
-    EXPECT_NEAR(method.forward_offset_m, 0.245, 0.015);
+    EXPECT_NEAR(method.forward_offset_m, 0.245, 0.005);
     EXPECT_GE(method.accepted_pairs, 40U);
   }
   EXPECT_GT(run.sharpness.coarse.size(), 0U);
