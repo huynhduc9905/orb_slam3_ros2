@@ -46,7 +46,9 @@ ament_target_dependencies(${PROJECT_NAME}_node
 # ── Offline calibration library ─────────────────────────────────────────────
 add_library(${PROJECT_NAME}_calibration
   src/rotation_bag_reader.cpp
-  src/calibration_deskew.cpp)
+  src/calibration_deskew.cpp
+  src/planar_icp.cpp
+  src/rotation_center_estimator.cpp)
 target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_calibration PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -110,6 +112,19 @@ if(BUILD_TESTING)
   target_include_directories(calibration_deskew_test PRIVATE include)
   target_link_libraries(calibration_deskew_test ${PROJECT_NAME}_calibration)
   ament_target_dependencies(calibration_deskew_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(planar_icp_test test/planar_icp_test.cpp)
+  target_include_directories(planar_icp_test PRIVATE include)
+  target_link_libraries(planar_icp_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(planar_icp_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(rotation_center_estimator_test
+    test/rotation_center_estimator_test.cpp)
+  target_include_directories(rotation_center_estimator_test PRIVATE include)
+  target_link_libraries(rotation_center_estimator_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(rotation_center_estimator_test
     rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
 endif()
 
