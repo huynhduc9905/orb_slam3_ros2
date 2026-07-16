@@ -48,7 +48,7 @@ COLCON_DEFAULTS_FILE=/dev/null colcon test \
 colcon test-result --verbose
 ```
 
-Current full-suite result: **379 tests, 0 errors, 0 failures, 0 skipped**.
+Current full-suite result: **383 tests, 0 errors, 0 failures, 0 skipped**.
 
 ## Offline lidar rotation-center check
 
@@ -60,7 +60,7 @@ the bag or changing runtime state:
 source install/setup.bash
 ros2 run orb_lidar_mapper lidar_rotation_center_check \
   --bag /home/duc/robot/bag/inplace-rotate \
-  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry2"
+  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry3"
 ```
 
 The immutable MCAP fixture is 91.353939991 seconds long and contains 915 raw
@@ -70,42 +70,40 @@ IMU messages. The first attempt at
 the bag contains contiguous duplicate IMU header stamps. The approved reader
 behavior now validates every finite angular-rate sample, averages only values
 sharing an equal contiguous stamp, and continues to reject decreasing stamps.
-That produced 8,569 unique IMU timestamps. The first successful scientific
-run remains at `artifacts/inplace-rotate-calibration-20260716-retry1`; it used
-the approved duplicate-stamp reader but predates the mobile report-layout fix.
-After approved generator commit `d4d344a`, exactly one new run produced the
-current report at the fresh `retry2` path above. Neither earlier path was
-reused or changed.
+That produced 8,569 unique IMU timestamps. The results in `retry1` and
+`retry2` are retained only as stale history: both were generated before
+`7794e53` corrected the lidar source-to-target yaw convention, so their
+zero-pair scientific interpretation must not be used. Retry2 added only the
+mobile report layout. After rebuilding `7794e53`, one fresh run produced the
+current result at the `retry3` path above; no prior path was reused or changed.
 
-The retry2 run used no threshold overrides. The predeclared defaults remained
+The retry3 run used no threshold overrides. The predeclared defaults remained
 unchanged, including `0.15 <= |omega| <= 0.45 rad/s`, maximum linear speed
 `0.02 m/s`, 10–30 degree pair separation, minimum overlap 0.40, maximum ICP
 RMSE 0.05 m, and maximum ICP/odom yaw disagreement 2 degrees. It returned
 scientific exit 3 and classification `INCONCLUSIVE`:
 
-| Method | Center x/y (m) | 95% CI x (m) | Accepted/attempted | RMSE (m) | Overlap | Rejections |
-|---|---|---|---:|---:|---:|---|
-| Odom | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 301; insufficient overlap 211; no accepted pairs 1 |
-| IMU | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 302; insufficient overlap 210; no accepted pairs 1 |
-| Existing `/scan` | 0.000 / 0.000 | [0.000, 0.000] | 0/512 | 0.000 | 0.000 | yaw disagreement 281; insufficient overlap 231; no accepted pairs 1 |
+| Method | Center x/y (m) | Forward/delta (m) | 95% CI x (m) | Pairs | Sectors | RMSE/overlap | Rejections |
+|---|---|---|---|---:|---:|---|---|
+| Odom | 0.2379652303 / -0.0061142640 | 0.2379652303 / -0.0220347697 | [0.2352081836, 0.2386867630] | 171/512 | 8 | 0.0082904437 / 0.7445378151 | yaw disagreement 200; insufficient overlap 110; implausible center 29; trimmed RMSE 2 |
+| IMU | 0.2375527669 / -0.0040162076 | 0.2375527669 / -0.0224472331 | [0.2350004394, 0.2386822376] | 172/512 | 8 | 0.0083020599 / 0.7443506196 | yaw disagreement 198; insufficient overlap 112; implausible center 28; trimmed RMSE 2 |
+| Existing `/scan` | 0.2476510983 / 0.0013325828 | 0.2476510983 / -0.0123489017 | [0.2461113510, 0.2500656229] | 172/512 | 8 | 0.0094094900 / 0.7543158596 | yaw disagreement 172; insufficient overlap 134; implausible center 34 |
 
-Those zero method fields and the aggregate 0.000 m consensus are the raw
-fail-closed values emitted when no pair is accepted; they are not usable
-physical estimates. Each method reports forward offset 0.000 m, delta
--0.260 m from the recorded 0.260 m center, zero covered yaw sectors, and is
-unreliable. The aggregate reason is `insufficient_reliable_methods`.
-Retry2 is scientifically identical to retry1: its JSON differs only in
-`configuration.output`, while both CSV files are byte-for-byte identical.
+All three methods are reliable. Their raw consensus is
+0.24063816538065377 m with 95% CI
+[0.23855052962519216, 0.2427258011361154] m, but the aggregate remains
+`INCONCLUSIVE` because the new bounded temporal-pair sharpness sweep is
+non-unique. Its raw minimum is 0.22200000000000003 m with score
+0.337169975947602 and rejection reason `sharpness_non_unique`.
 
-The independent sharpness sweep has a raw minimum at 0.23575000000000004 m
-(score 0.0011207191715077018), 0.02425 m below the recorded offset, but it is
-also unreliable because it did not meet the predeclared 3% prominence gate
-(`sharpness_not_three_percent_sharper`). Treat 0.23575 m only as a candidate
-for further measurement that requires explicit user approval. No TF, URDF,
-bag data, or source configuration was changed, and this result does not
-authorize changing any mount transform.
+Compared with stale retry2, the corrected yaw convention reduced yaw
+rejections by 101/104/109 for Odom/IMU/Existing `/scan` and exposed valid
+pairs to the later overlap, RMSE, and center-plausibility gates. No threshold
+changed. No offset recommendation is made from this inconclusive result. No
+TF, URDF, bag data, or source configuration was changed, and no mount
+transform should be changed without a separately approved measurement.
 
-The exact retry2 HTML was verified at 1440x900, 768x1024, and 390x844. On
+The exact retry3 HTML was verified at 1440x900, 768x1024, and 390x844. On
 mobile, all ten labels and exact values for every method fit in each stacked
 row with no table or document horizontal overflow. The checks also covered
 signs, method colors, warnings, map framing, sharpness rendering, exact JSON
