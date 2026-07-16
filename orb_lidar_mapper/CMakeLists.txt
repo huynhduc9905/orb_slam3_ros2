@@ -44,7 +44,9 @@ ament_target_dependencies(${PROJECT_NAME}_node
   diagnostic_msgs std_msgs orb_slam3_msgs)
 
 # ── Offline calibration library ─────────────────────────────────────────────
-add_library(${PROJECT_NAME}_calibration src/rotation_bag_reader.cpp)
+add_library(${PROJECT_NAME}_calibration
+  src/rotation_bag_reader.cpp
+  src/calibration_deskew.cpp)
 target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_calibration PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -102,6 +104,12 @@ if(BUILD_TESTING)
   target_include_directories(rotation_bag_reader_test PRIVATE include)
   target_link_libraries(rotation_bag_reader_test ${PROJECT_NAME}_calibration)
   ament_target_dependencies(rotation_bag_reader_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_deskew_test test/calibration_deskew_test.cpp)
+  target_include_directories(calibration_deskew_test PRIVATE include)
+  target_link_libraries(calibration_deskew_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_deskew_test
     rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
 endif()
 
