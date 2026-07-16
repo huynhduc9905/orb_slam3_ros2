@@ -13,6 +13,10 @@ find_package(visualization_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(orb_slam3_msgs REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(PCL 1.15 REQUIRED COMPONENTS common registration kdtree filters)
 
 # ── Core library (no ROS) ────────────────────────────────────────────────────
 add_library(${PROJECT_NAME}_core
@@ -38,6 +42,17 @@ ament_target_dependencies(${PROJECT_NAME}_node
   rclcpp tf2 tf2_ros tf2_geometry_msgs
   sensor_msgs nav_msgs geometry_msgs visualization_msgs
   diagnostic_msgs std_msgs orb_slam3_msgs)
+
+# ── Offline calibration library ─────────────────────────────────────────────
+add_library(${PROJECT_NAME}_calibration src/rotation_bag_reader.cpp)
+target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
+target_include_directories(${PROJECT_NAME}_calibration PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(${PROJECT_NAME}_calibration
+  ${PROJECT_NAME}_core ${PCL_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME}_calibration
+  rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs pcl_conversions)
 
 # ── Executable ───────────────────────────────────────────────────────────────
 add_executable(${PROJECT_NAME}_node_exe src/main.cpp)
@@ -80,13 +95,20 @@ if(BUILD_TESTING)
   ament_target_dependencies(mapper_node_test
     rclcpp tf2_ros sensor_msgs nav_msgs geometry_msgs
     visualization_msgs orb_slam3_msgs)
+
+  ament_add_gtest(rotation_bag_reader_test test/rotation_bag_reader_test.cpp)
+  target_include_directories(rotation_bag_reader_test PRIVATE include)
+  target_link_libraries(rotation_bag_reader_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(rotation_bag_reader_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
 endif()
 
 install(TARGETS ${PROJECT_NAME}_core EXPORT ${PROJECT_NAME}_targets)
 install(TARGETS ${PROJECT_NAME}_node EXPORT ${PROJECT_NAME}_targets)
+install(TARGETS ${PROJECT_NAME}_calibration EXPORT ${PROJECT_NAME}_targets)
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp tf2 tf2_ros tf2_geometry_msgs
   sensor_msgs nav_msgs geometry_msgs visualization_msgs
-  diagnostic_msgs std_msgs orb_slam3_msgs)
+  diagnostic_msgs std_msgs orb_slam3_msgs rosbag2_cpp tf2_msgs pcl_conversions)
 ament_package()
