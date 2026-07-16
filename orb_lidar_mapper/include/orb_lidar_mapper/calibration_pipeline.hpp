@@ -30,6 +30,12 @@ struct CalibrationRun {
 };
 
 CalibrationRun runCalibration(const CalibrationConfig&);
+double preliminarySharpnessHint(
+  const std::array<MethodEstimate, 3>& methods, double fallback_offset_m = 0.260);
+std::vector<ScanPair> selectCommonCalibrationSchedule(
+  const std::vector<DeskewedScan>& scans, const TimedPoseBuffer& odom,
+  const std::vector<MotionInterval>& stable_intervals,
+  std::size_t maximum_pairs = 512);
 int resultExitCode(ResultClass);
 
 }  // namespace orb_lidar_mapper

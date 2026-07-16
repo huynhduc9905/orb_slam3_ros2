@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -126,26 +127,54 @@ std::vector<std::uint64_t> orderedIds(const std::vector<DeskewedScan>& scans) {
   return result;
 }
 
-std::vector<ScanPair> commonSchedule(const std::vector<DeskewedScan>& base,
-                                     const TimedPoseBuffer& odom,
-                                     const std::vector<MotionInterval>& intervals) {
-  const auto base_pairs = selectCalibrationPairs(
-    base, odom, intervals, kPairMinYaw, kPairMaxYaw);
-  const auto ids = orderedIds(base);
-  ScanMap by_position;
-  for (std::size_t i = 0; i < ids.size(); ++i) by_position[ids[i]] = i;
-  std::vector<ScanPair> result;
-  result.reserve(base_pairs.size());
-  for (const auto& pair : base_pairs) result.push_back(pair);
-  return result;
-}
-
 MethodEstimate estimateMethod(const std::vector<CenterSample>& samples,
                               DeskewMethod method) {
   return robustMethodEstimate(method, samples);
 }
 
 }  // namespace
+
+std::vector<ScanPair> selectCommonCalibrationSchedule(
+  const std::vector<DeskewedScan>& scans, const TimedPoseBuffer& odom,
+  const std::vector<MotionInterval>& stable_intervals, std::size_t maximum_pairs) {
+  if (maximum_pairs == 0) return {};
+  const auto candidates = selectCalibrationPairs(
+    scans, odom, stable_intervals, kPairMinYaw, kPairMaxYaw);
+  std::array<std::vector<ScanPair>, 8> by_sector;
+  for (const auto& candidate : candidates) {
+    if (candidate.yaw_sector < by_sector.size()) by_sector[candidate.yaw_sector].push_back(candidate);
+  }
+  std::vector<ScanPair> result;
+  result.reserve(std::min(maximum_pairs, candidates.size()));
+  std::array<std::size_t, 8> next{};
+  while (result.size() < maximum_pairs) {
+    bool added = false;
+    for (std::size_t sector = 0; sector < by_sector.size() && result.size() < maximum_pairs; ++sector) {
+      if (next[sector] >= by_sector[sector].size()) continue;
+      result.push_back(by_sector[sector][next[sector]++]);
+      added = true;
+    }
+    if (!added) break;
+  }
+  return result;
+}
+
+double preliminarySharpnessHint(
+  const std::array<MethodEstimate, 3>& methods, double fallback_offset_m) {
+  std::vector<double> reliable_offsets;
+  for (const auto& method : methods) {
+    if (method.reliable && std::isfinite(method.forward_offset_m)) {
+      reliable_offsets.push_back(method.forward_offset_m);
+    }
+  }
+  if (reliable_offsets.empty()) return fallback_offset_m;
+  std::sort(reliable_offsets.begin(), reliable_offsets.end());
+  const std::size_t middle = reliable_offsets.size() / 2;
+  if (reliable_offsets.size() % 2 == 0) {
+    return (reliable_offsets[middle - 1] + reliable_offsets[middle]) / 2.0;
+  }
+  return reliable_offsets[middle];
+}
 
 CalibrationRun runCalibration(const CalibrationConfig& config) {
   if (config.bag_path.empty() || config.output_dir.empty() ||
@@ -165,7 +194,7 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
 
   const auto odom_scans = deskewOdom(run.dataset, odom, config.range_cap_m);
   if (odom_scans.size() < 3) throw std::runtime_error("no usable odometry-deskewed scans");
-  const auto schedule = commonSchedule(odom_scans, odom, intervals);
+  const auto schedule = selectCommonCalibrationSchedule(odom_scans, odom, intervals);
   if (schedule.empty()) throw std::runtime_error("no calibration scan pairs");
   const auto base_ids = orderedIds(odom_scans);
   PlanarIcp icp(config.icp);
@@ -212,8 +241,8 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
   run.center_samples.insert(run.center_samples.end(), odom_samples.begin(), odom_samples.end());
   run.center_samples.insert(run.center_samples.end(), imu_samples.begin(), imu_samples.end());
   run.center_samples.insert(run.center_samples.end(), existing_samples.begin(), existing_samples.end());
-  const double consensus_hint = odom_estimate.reliable ? odom_estimate.forward_offset_m : kImuStartingOffset;
-  run.sharpness = evaluateMapSharpness(run.dataset, odom_scans, odom, consensus_hint);
+  run.sharpness = evaluateMapSharpness(
+    run.dataset, odom_scans, odom, preliminarySharpnessHint(run.methods));
   run.aggregate = classifyCalibration(
     {run.methods[0], run.methods[1], run.methods[2]}, run.sharpness,
     run.dataset.recorded_mount.x_m);
