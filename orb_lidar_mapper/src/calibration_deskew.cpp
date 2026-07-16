@@ -19,7 +19,7 @@ bool validScanMetadata(const ScanValue& scan) {
   return std::isfinite(scan.angle_min) && std::isfinite(scan.angle_increment) &&
          std::isfinite(scan.time_increment) && scan.time_increment >= 0.0F &&
          std::isfinite(scan.range_min) && std::isfinite(scan.range_max) &&
-         scan.range_min >= 0.0F && scan.range_max >= scan.range_min &&
+         scan.range_max >= scan.range_min &&
          !scan.ranges.empty();
 }
 
@@ -37,6 +37,22 @@ bool validRange(double range, const ScanValue& scan, double range_cap_m) {
   const double lower = std::max(static_cast<double>(scan.range_min), 0.15);
   const double upper = std::min(static_cast<double>(scan.range_max), range_cap_m);
   return lower <= upper && range >= lower && range <= upper;
+}
+
+std::optional<std::int64_t> checkedAdd(std::int64_t left, std::int64_t right) {
+  if ((right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) ||
+      (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)) {
+    return std::nullopt;
+  }
+  return left + right;
+}
+
+std::optional<std::int64_t> checkedSubtract(std::int64_t left, std::int64_t right) {
+  if ((right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) ||
+      (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right)) {
+    return std::nullopt;
+  }
+  return left - right;
 }
 
 std::optional<std::int64_t> rayStamp(const ScanValue& scan, std::size_t index) {
@@ -79,13 +95,11 @@ std::optional<std::int64_t> midpointStamp(const ScanValue& scan) {
   if (!end) {
     return std::nullopt;
   }
-  const __int128 sum = static_cast<__int128>(scan.stamp_ns) + *end;
-  const __int128 midpoint = sum / 2;
-  if (midpoint < std::numeric_limits<std::int64_t>::min() ||
-      midpoint > std::numeric_limits<std::int64_t>::max()) {
+  const auto half_sum = checkedAdd(scan.stamp_ns / 2, *end / 2);
+  if (!half_sum) {
     return std::nullopt;
   }
-  return static_cast<std::int64_t>(midpoint);
+  return checkedAdd(*half_sum, (scan.stamp_ns % 2 + *end % 2) / 2);
 }
 
 Point2 correctedPoint(const Pose2& midpoint_base, const Pose2& ray_base,
@@ -274,21 +288,20 @@ std::vector<ScanAssociation> associateUndistortedScans(
   std::vector<std::int64_t> delays;
   delays.reserve(raw.size());
   for (std::size_t index = 0; index < raw.size(); ++index) {
-    const __int128 delay = static_cast<__int128>(undistorted[index].stamp_ns) -
-                           static_cast<__int128>(raw[index].stamp_ns);
-    if (delay < std::numeric_limits<std::int64_t>::min() ||
-        delay > std::numeric_limits<std::int64_t>::max()) {
+    const auto delay = checkedSubtract(undistorted[index].stamp_ns,
+                                       raw[index].stamp_ns);
+    if (!delay) {
       return {};
     }
-    delays.push_back(static_cast<std::int64_t>(delay));
+    delays.push_back(*delay);
   }
   const std::int64_t robust_delay = median(delays);
   std::vector<ScanAssociation> result;
   result.reserve(raw.size());
   for (std::size_t index = 0; index < raw.size(); ++index) {
-    const __int128 deviation = static_cast<__int128>(delays[index]) - robust_delay;
-    if (deviation < -maximum_delay_deviation_ns ||
-        deviation > maximum_delay_deviation_ns) {
+    const auto deviation = checkedSubtract(delays[index], robust_delay);
+    if (!deviation || *deviation < -maximum_delay_deviation_ns ||
+        *deviation > maximum_delay_deviation_ns) {
       return {};
     }
     result.push_back({raw[index].id, undistorted[index].id, robust_delay});
@@ -298,10 +311,18 @@ std::vector<ScanAssociation> associateUndistortedScans(
 
 DeskewedScan adaptUndistortedScan(
     const ScanValue& scan, const ScanAssociation& association, double range_cap_m) {
-  DeskewedScan result{scan.id, scan.stamp_ns, DeskewMethod::kExistingScan, {}};
-  if (!validScanMetadata(scan) || !std::isfinite(range_cap_m) || range_cap_m < 0.0) {
+  DeskewedScan result{0, 0, DeskewMethod::kExistingScan, {}};
+  if (!validScanMetadata(scan) || scan.id != association.undistorted_scan_id ||
+      !std::isfinite(range_cap_m) || range_cap_m < 0.0) {
     return result;
   }
+  const auto raw_reference = checkedSubtract(scan.stamp_ns,
+                                             association.timestamp_delay_ns);
+  if (!raw_reference) {
+    return result;
+  }
+  result.scan_id = association.raw_scan_id;
+  result.reference_stamp_ns = *raw_reference;
   result.points.reserve(scan.ranges.size());
   for (std::size_t index = 0; index < scan.ranges.size(); ++index) {
     const double range = scan.ranges[index];
@@ -315,7 +336,6 @@ DeskewedScan adaptUndistortedScan(
     }
     result.points.push_back({std::cos(angle) * range, std::sin(angle) * range});
   }
-  (void)association;
   return result;
 }
 

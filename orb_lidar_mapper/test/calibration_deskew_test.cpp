@@ -153,12 +153,87 @@ TEST(CalibrationDeskew, AssociatesExistingScanByOrderAndMedianDelay) {
   EXPECT_EQ(matches[1].timestamp_delay_ns, 90);
   const auto adapted = adaptUndistortedScan(filtered[1], matches[1], 12.0);
   EXPECT_EQ(adapted.method, DeskewMethod::kExistingScan);
-  EXPECT_EQ(adapted.reference_stamp_ns, 190);
+  EXPECT_EQ(adapted.scan_id, 2U);
+  EXPECT_EQ(adapted.reference_stamp_ns, 100);
   EXPECT_EQ(adapted.points.size(), 1U);
 
   auto ambiguous = filtered;
   ambiguous[2].stamp_ns = 500;
   EXPECT_TRUE(associateUndistortedScans(raw, ambiguous, 2).empty());
+}
+
+TEST(CalibrationDeskew, AdaptRejectsMismatchedAssociation) {
+  const auto scan = rawScan();
+  const ScanAssociation association{99U, scan.id + 1U, 90};
+
+  const auto adapted = adaptUndistortedScan(scan, association, 12.0);
+
+  EXPECT_TRUE(adapted.points.empty());
+}
+
+TEST(CalibrationDeskew, AdaptRejectsReferenceTimestampUnderflowAndOverflow) {
+  auto scan = rawScan();
+  scan.id = 7;
+
+  scan.stamp_ns = std::numeric_limits<std::int64_t>::min();
+  EXPECT_TRUE(adaptUndistortedScan(
+                  scan, ScanAssociation{1U, scan.id, 1}, 12.0).points.empty());
+
+  scan.stamp_ns = std::numeric_limits<std::int64_t>::max();
+  EXPECT_TRUE(adaptUndistortedScan(
+                  scan, ScanAssociation{1U, scan.id, -1}, 12.0).points.empty());
+}
+
+TEST(CalibrationDeskew, NegativeRecordedRangeMinimumUsesContractLowerBound) {
+  auto scan = rawScan();
+  scan.range_min = -1.0F;
+  scan.ranges = {0.10F, 0.15F, 2.0F};
+
+  TimedPoseBuffer odom(1'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(odom.push({0, Pose2{}}));
+  ASSERT_TRUE(odom.push({100'000'000, Pose2{}}));
+
+  const auto result = deskewWithOdom(
+      scan, odom, StaticLidarMount{0.0, 0.0, 0.0, kPi}, 12.0);
+  ASSERT_TRUE(result);
+  ASSERT_EQ(result->points.size(), 2U);
+  EXPECT_NEAR(result->points.front().x, 0.15 * std::cos(0.1), 1e-8);
+}
+
+TEST(CalibrationDeskew, ExtremeAssociationDeviationFailsClosed) {
+  const auto make = [](std::int64_t stamp) {
+    ScanValue scan;
+    scan.stamp_ns = stamp;
+    return scan;
+  };
+  const std::vector<ScanValue> raw = {
+      make(std::numeric_limits<std::int64_t>::max()),
+      make(std::numeric_limits<std::int64_t>::min())};
+  const std::vector<ScanValue> undistorted = {
+      make(0), make(0)};
+
+  EXPECT_TRUE(associateUndistortedScans(raw, undistorted,
+                                        std::numeric_limits<std::int64_t>::max())
+                  .empty());
+}
+
+TEST(CalibrationDeskew, MidpointTimestampBoundariesAreChecked) {
+  auto scan = rawScan();
+  scan.stamp_ns = std::numeric_limits<std::int64_t>::max();
+  scan.time_increment = 0.0F;
+  scan.ranges = {2.0F, 2.0F};
+
+  TimedPoseBuffer odom(1'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(odom.push({std::numeric_limits<std::int64_t>::max(), Pose2{}}));
+  const auto boundary = deskewWithOdom(
+      scan, odom, StaticLidarMount{0.0, 0.0, 0.0, kPi}, 12.0);
+  ASSERT_TRUE(boundary);
+  EXPECT_EQ(boundary->reference_stamp_ns,
+            std::numeric_limits<std::int64_t>::max());
+
+  scan.time_increment = 1e-9F;
+  EXPECT_FALSE(deskewWithOdom(
+      scan, odom, StaticLidarMount{0.0, 0.0, 0.0, kPi}, 12.0));
 }
 
 }  // namespace
