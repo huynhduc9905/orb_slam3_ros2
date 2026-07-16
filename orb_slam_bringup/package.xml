@@ -19,6 +19,7 @@
   <depend>tf2_msgs</depend>
   <depend>std_msgs</depend>
   <depend>diagnostic_msgs</depend>
+  <depend>visualization_msgs</depend>
   <depend>rosbag2_py</depend>
   <depend>orb_slam3_msgs</depend>
 
@@ -27,6 +28,8 @@
 
   <test_depend>python3-pytest</test_depend>
   <test_depend>python3-yaml</test_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

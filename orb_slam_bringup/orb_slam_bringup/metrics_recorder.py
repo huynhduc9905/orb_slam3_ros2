@@ -1551,13 +1551,14 @@ def _verify_nav2_map(grid: MapGridSample, stem: Path) -> bool:
 
 def main(args=None) -> None:
     import rclpy
+    from rclpy.executors import ExternalShutdownException
 
     rclpy.init(args=args)
     recorder = MetricsRecorderNode()
     node = recorder.node
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         recorder._flush()

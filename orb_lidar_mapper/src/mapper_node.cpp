@@ -1,7 +1,11 @@
 #include "orb_lidar_mapper/mapper_node.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <limits>
+#include <mutex>
 #include <stdexcept>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -16,6 +20,36 @@ namespace {
 int64_t toNs(const builtin_interfaces::msg::Time& stamp) {
   return static_cast<int64_t>(stamp.sec) * 1'000'000'000LL +
          static_cast<int64_t>(stamp.nanosec);
+}
+
+std::optional<int64_t> scanEndStampNs(const sensor_msgs::msg::LaserScan& scan) {
+  const int64_t start_ns = toNs(scan.header.stamp);
+  if (!std::isfinite(scan.time_increment) || scan.time_increment < 0.0F) {
+    return std::nullopt;
+  }
+  if (scan.ranges.empty()) {
+    return start_ns;
+  }
+  const long double offset_ns = static_cast<long double>(scan.ranges.size() - 1U) *
+    static_cast<long double>(scan.time_increment) * 1'000'000'000.0L;
+  if (!std::isfinite(offset_ns)) {
+    return std::nullopt;
+  }
+  const long double end_ns = static_cast<long double>(start_ns) + std::round(offset_ns);
+  if (end_ns < static_cast<long double>(std::numeric_limits<int64_t>::min()) ||
+      end_ns > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(end_ns);
+}
+
+bool advancedBeyond(
+  const std::optional<int64_t>& latest_ns, int64_t target_ns, int64_t timeout_ns) {
+  if (!latest_ns || *latest_ns < target_ns) {
+    return false;
+  }
+  return static_cast<std::uint64_t>(*latest_ns) - static_cast<std::uint64_t>(target_ns) >
+    static_cast<std::uint64_t>(timeout_ns);
 }
 
 double yawFromQuat(const geometry_msgs::msg::Quaternion& q) {
@@ -53,6 +87,103 @@ Point2 transformLocal(const Pose2& pose, const Point2& p) {
 
 }  // namespace
 
+namespace mapper_node_test_hooks {
+namespace {
+
+struct PublishBarrier {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool armed{false};
+  bool entered{false};
+  bool released{false};
+  bool completed{false};
+  bool destructor_entered{false};
+};
+
+PublishBarrier& publishBarrier() {
+  static PublishBarrier barrier;
+  return barrier;
+}
+
+}  // namespace
+
+void armPublishBarrier() {
+  auto& barrier = publishBarrier();
+  std::lock_guard<std::mutex> lock(barrier.mutex);
+  barrier.armed = true;
+  barrier.entered = false;
+  barrier.released = false;
+  barrier.completed = false;
+  barrier.destructor_entered = false;
+}
+
+bool waitForPublishBarrier(std::chrono::milliseconds timeout) {
+  auto& barrier = publishBarrier();
+  std::unique_lock<std::mutex> lock(barrier.mutex);
+  return barrier.cv.wait_for(lock, timeout, [&barrier] { return barrier.entered; });
+}
+
+bool waitForDestructorEntry(std::chrono::milliseconds timeout) {
+  auto& barrier = publishBarrier();
+  std::unique_lock<std::mutex> lock(barrier.mutex);
+  return barrier.cv.wait_for(
+    lock, timeout, [&barrier] { return barrier.destructor_entered; });
+}
+
+void releasePublishBarrier() {
+  auto& barrier = publishBarrier();
+  {
+    std::lock_guard<std::mutex> lock(barrier.mutex);
+    barrier.released = true;
+  }
+  barrier.cv.notify_all();
+}
+
+bool publishCompleted() {
+  auto& barrier = publishBarrier();
+  std::lock_guard<std::mutex> lock(barrier.mutex);
+  return barrier.completed;
+}
+
+void resetPublishBarrier() {
+  auto& barrier = publishBarrier();
+  {
+    std::lock_guard<std::mutex> lock(barrier.mutex);
+    barrier.armed = false;
+    barrier.entered = false;
+    barrier.released = true;
+    barrier.completed = false;
+    barrier.destructor_entered = false;
+  }
+  barrier.cv.notify_all();
+}
+
+void beforePublish() {
+  auto& barrier = publishBarrier();
+  std::unique_lock<std::mutex> lock(barrier.mutex);
+  if (!barrier.armed) return;
+  barrier.entered = true;
+  barrier.cv.notify_all();
+  barrier.cv.wait(lock, [&barrier] { return barrier.released; });
+}
+
+void afterPublish() {
+  auto& barrier = publishBarrier();
+  std::lock_guard<std::mutex> lock(barrier.mutex);
+  if (barrier.armed) barrier.completed = true;
+}
+
+void notifyDestructorEntry() {
+  auto& barrier = publishBarrier();
+  {
+    std::lock_guard<std::mutex> lock(barrier.mutex);
+    if (barrier.armed) barrier.destructor_entered = true;
+  }
+  barrier.cv.notify_all();
+}
+
+}  // namespace mapper_node_test_hooks
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,9 +201,25 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   wheel_retention_s_(declare_parameter("wheel_retention_s", 300.0)),
   wheel_max_gap_ms_(declare_parameter("wheel_max_gap_ms", 100.0)),
   resolution_m_(declare_parameter("resolution_m", 0.05)),
-  usable_range_m_(declare_parameter("usable_range_m", 12.0)),
+  usable_range_m_(declare_parameter("usable_range_m", 20.0)),
   max_roll_pitch_deg_(declare_parameter("max_roll_pitch_deg", 10.0)),
-  max_height_delta_m_(declare_parameter("max_height_delta_m", 0.15)) {
+  max_height_delta_m_(declare_parameter("max_height_delta_m", 0.15)),
+  max_scan_yaw_change_rad_(declare_parameter("max_scan_yaw_change_rad", 0.005)),
+  visual_anchor_max_gap_ms_(declare_parameter("visual_anchor_max_gap_ms", 200.0)),
+  pending_scan_timeout_s_(declare_parameter("pending_scan_timeout_s", 2.0)),
+  pending_scan_limit_(declare_parameter("pending_scan_limit", 200)) {
+
+  if (!std::isfinite(max_scan_yaw_change_rad_) ||
+      !std::isfinite(visual_anchor_max_gap_ms_) ||
+      !std::isfinite(pending_scan_timeout_s_) ||
+      max_scan_yaw_change_rad_ < 0.0 || visual_anchor_max_gap_ms_ < 0.0 ||
+      pending_scan_timeout_s_ < 0.0 || pending_scan_limit_ <= 0 ||
+      visual_anchor_max_gap_ms_ >
+        static_cast<double>(std::numeric_limits<int64_t>::max()) / 1e6 ||
+      pending_scan_timeout_s_ >
+        static_cast<double>(std::numeric_limits<int64_t>::max()) / 1e9) {
+    throw std::invalid_argument("scan gating and pending-queue parameters are invalid");
+  }
 
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -96,19 +243,20 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       });
 
   // QoS
-  auto sensor_qos  = rclcpp::SensorDataQoS();
-  auto reliable_tl = rclcpp::QoS(1).reliable().transient_local();
-  auto reliable    = rclcpp::QoS(100).reliable();
-  auto reliable10  = rclcpp::QoS(10).reliable();
+  auto sensor_qos = rclcpp::SensorDataQoS();
+  auto snapshot_qos = rclcpp::QoS(1).reliable().transient_local();
+  auto map_history_qos = rclcpp::QoS(10).reliable().transient_local();
+  auto reliable = rclcpp::QoS(100).reliable();
+  auto reliable10 = rclcpp::QoS(10).reliable();
 
   // Publishers
-  map_pub_  = create_publisher<nav_msgs::msg::OccupancyGrid>(map_topic_, reliable_tl);
+  map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(map_topic_, map_history_qos);
   map_rev_pub_ = create_publisher<orb_slam3_msgs::msg::MapRevision>(
-      "/orb_lidar/map_revision", reliable_tl);
+      "/orb_lidar/map_revision", map_history_qos);
   corrected_path_pub_ = create_publisher<nav_msgs::msg::Path>(
-      "/orb_lidar/corrected_path", reliable_tl);
+      "/orb_lidar/corrected_path", snapshot_qos);
   corrected_path_rev_pub_ = create_publisher<orb_slam3_msgs::msg::RevisionedPath>(
-      "/orb_lidar/corrected_path_revisioned", reliable_tl);
+      "/orb_lidar/corrected_path_revisioned", snapshot_qos);
   wheel_path_pub_ = create_publisher<nav_msgs::msg::Path>(
       "/orb_lidar/wheel_path", reliable10);
   provisional_scan_pub_ = create_publisher<visualization_msgs::msg::Marker>(
@@ -132,12 +280,19 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       [this](orb_slam3_msgs::msg::TrackedFrame::ConstSharedPtr msg) { onTrackedFrame(msg); });
 
   graph_sub_ = create_subscription<orb_slam3_msgs::msg::GraphSnapshot>(
-      graph_snapshot_topic_, reliable_tl,
+      graph_snapshot_topic_, snapshot_qos,
       [this](orb_slam3_msgs::msg::GraphSnapshot::ConstSharedPtr msg) { onGraphSnapshot(msg); });
 
   event_sub_ = create_subscription<orb_slam3_msgs::msg::TrackingEvent>(
       tracking_event_topic_, reliable,
       [this](orb_slam3_msgs::msg::TrackingEvent::ConstSharedPtr msg) { onTrackingEvent(msg); });
+}
+
+MapperNode::~MapperNode() {
+  // The rebuilder worker invokes a callback that captures this node. Stop and
+  // join it before publishers and the other node members begin destruction.
+  mapper_node_test_hooks::notifyDestructorEntry();
+  rebuilder_.reset();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +320,8 @@ void MapperNode::onOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg) {
   path.header.frame_id = map_frame_;
   path.poses = wheel_poses_;
   wheel_path_pub_->publish(path);
+
+  processPendingScansLocked();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +338,7 @@ void MapperNode::onTrackedFrame(orb_slam3_msgs::msg::TrackedFrame::ConstSharedPt
   anchor.pose_valid = msg->pose_valid;
   anchor.map_id = msg->map_id;
   anchor.reference_keyframe_id = msg->reference_keyframe_id;
+  anchor.graph_revision = msg->graph_revision;
   if (msg->pose_valid) {
     anchor.map_pose = poseFromMsg(msg->pose);
     anchor.reference_to_frame = poseFromTransform(msg->reference_to_frame);
@@ -188,20 +346,24 @@ void MapperNode::onTrackedFrame(orb_slam3_msgs::msg::TrackedFrame::ConstSharedPt
 
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Populate wheel_pose by interpolating the mirror buffer at the frame timestamp.
-  // Identity default would poison the anchor (map_pose * I^{-1} * scan_wheel).
+  // Populate wheel_pose when possible. If odometry for this sensor timestamp
+  // has not arrived yet, TrajectoryStore::refreshWheelData() backfills it on a
+  // later odometry callback; committed scans wait for that bridge instead of
+  // permanently snapping to the visual frame timestamp.
   const auto wheel_at_frame = wheel_buf_->interpolate(stamp_ns);
   if (!wheel_at_frame) {
     ++wheel_interp_failures_;
     RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "wheel interpolation failed at tracked-frame stamp %ld ns; skipping anchor",
+        "wheel interpolation unavailable at tracked-frame stamp %ld ns; "
+        "deferring dependent committed scans until odometry backfill",
         static_cast<long>(stamp_ns));
-    publishDiagnostics("WARN", "tracked frame skipped: wheel interpolation failed");
-    return;
+    publishDiagnostics("WARN",
+        "tracked frame waiting for wheel-odometry backfill");
   }
-  anchor.wheel_pose = *wheel_at_frame;
+  anchor.wheel_pose = wheel_at_frame;
   traj_->addTrackedFrame(anchor);
+  processPendingScansLocked();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -269,6 +431,7 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     if (!snap.active_map_connected) {
       publishDiagnostics("WARN", "graph snapshot disconnected: keeping last published map frozen");
     }
+    processPendingScansLocked();
     return;
   }
 
@@ -294,6 +457,7 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     was_lost_ = false;
     deleteProvisionalMarkers();
   }
+  processPendingScansLocked();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,10 +482,16 @@ void MapperNode::onTrackingEvent(orb_slam3_msgs::msg::TrackingEvent::ConstShared
 void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
   ++scans_received_;
   const int64_t stamp_ns = toNs(msg->header.stamp);
+  const auto end_ns = scanEndStampNs(*msg);
+  if (!end_ns) {
+    publishDiagnostics("WARN", "scan rejected: invalid per-ray timing");
+    return;
+  }
   const std::string scan_frame = msg->header.frame_id;
 
-  // TF lookup at the scan stamp (not latest) so dynamic mounts stay consistent.
-  // Static TFs remain valid at any stamp, so tests with a static broadcaster still resolve.
+  // Resolve the mount at acquisition time before queuing. Processing itself is
+  // deferred until wheel odometry covers the final ray and a future visual
+  // frame brackets the complete sweep.
   Pose2 base_to_lidar;
   try {
     const rclcpp::Time scan_stamp(msg->header.stamp);
@@ -352,60 +522,136 @@ void MapperNode::onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg) {
     return;
   }
 
-  ScanValue sv;
-  sv.id             = static_cast<uint64_t>(stamp_ns);
-  sv.stamp_ns       = stamp_ns;
-  sv.angle_min      = msg->angle_min;
-  sv.angle_increment = msg->angle_increment;
-  sv.time_increment = msg->time_increment;
-  sv.range_min      = msg->range_min;
-  sv.range_max      = msg->range_max;
-  sv.ranges         = msg->ranges;
-
   std::lock_guard<std::mutex> lock(mutex_);
+  if (pending_scans_.size() >= static_cast<std::size_t>(pending_scan_limit_)) {
+    pending_scans_.pop_front();
+    ++scans_timeout_dropped_;
+    publishDiagnostics("WARN", "pending scan queue full: dropped oldest scan");
+  }
+  pending_scans_.push_back({msg, base_to_lidar, stamp_ns, *end_ns, was_lost_});
+  processPendingScansLocked();
+}
 
-  // Distinguish the two placeScan failure modes for diagnostics.
-  const bool have_wheel = wheel_buf_->interpolate(stamp_ns).has_value();
-
-  // Place scan in trajectory store
-  const auto placement = traj_->placeScan(stamp_ns);
-  if (!placement.has_value()) {
-    if (!have_wheel) {
-      ++scans_no_wheel_;
+void MapperNode::processPendingScansLocked() {
+  for (auto scan = pending_scans_.begin(); scan != pending_scans_.end();) {
+    const PendingScanResult result = processPendingScanLocked(*scan);
+    if (result == PendingScanResult::kWaiting) {
+      ++scan;
     } else {
-      ++scans_no_anchor_;
+      scan = pending_scans_.erase(scan);
     }
-    return;
   }
-  const ScanPose scan_pose = *placement;
+}
 
-  // Deskew into the scan-start base frame (identity committed pose).
-  // MapRebuilder applies the corrected ScanPose later when inserting rays.
-  auto rays_opt = ScanDeskewer::deskew(sv, Pose2{}, base_to_lidar, *wheel_buf_);
-  if (!rays_opt.has_value() || rays_opt->empty()) {
-    return;
+MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
+  const PendingScan& pending) {
+  const int64_t timeout_ns = static_cast<int64_t>(pending_scan_timeout_s_ * 1e9);
+  const int64_t anchor_gap_ns = static_cast<int64_t>(visual_anchor_max_gap_ms_ * 1e6);
+  const auto newest_wheel = wheel_buf_->newestStamp();
+
+  // maximumYawExcursion() also verifies interpolation coverage across the full
+  // scan interval. No directional prefix is ever archived.
+  const auto yaw_excursion = wheel_buf_->maximumYawExcursion(
+    pending.start_ns, pending.end_ns);
+  if (!yaw_excursion) {
+    if (advancedBeyond(newest_wheel, pending.end_ns, timeout_ns)) {
+      ++scans_no_wheel_;
+      ++scans_timeout_dropped_;
+      publishDiagnostics("WARN", "scan dropped: complete wheel coverage timed out");
+      return PendingScanResult::kDropped;
+    }
+    return PendingScanResult::kWaiting;
   }
-  const std::vector<Ray2>& local_rays = *rays_opt;
+  if (*yaw_excursion > max_scan_yaw_change_rad_) {
+    ++scans_turn_rejected_;
+    publishDiagnostics("WARN", "scan rejected: yaw excursion exceeds configured limit");
+    return PendingScanResult::kDropped;
+  }
 
-  // Archive rays in the local base frame.
+  ScanValue scan;
+  scan.id = static_cast<uint64_t>(pending.start_ns);
+  scan.stamp_ns = pending.start_ns;
+  scan.angle_min = pending.message->angle_min;
+  scan.angle_increment = pending.message->angle_increment;
+  scan.time_increment = pending.message->time_increment;
+  scan.range_min = pending.message->range_min;
+  scan.range_max = pending.message->range_max;
+  scan.ranges = pending.message->ranges;
+
+  const bool loss_scan = pending.tracking_lost ||
+    traj_->isLossTimestamp(pending.start_ns);
+  std::optional<ScanPose> placement;
+  std::vector<Ray2> local_rays;
+  std::optional<ArchivedBracketedMotion> archived_motion;
+
+  if (loss_scan) {
+    // LOST intervals keep the established wheel-only provisional geometry;
+    // timestamp-based membership survives callback reordering and recovery.
+    auto rays = ScanDeskewer::deskew(
+      scan, Pose2{}, pending.base_to_lidar, *wheel_buf_);
+    if (!rays || rays->empty()) {
+      return PendingScanResult::kDropped;
+    }
+    local_rays = std::move(*rays);
+    placement = traj_->placeScan(
+      pending.start_ns, pending.tracking_lost &&
+        !traj_->isLossTimestamp(pending.start_ns));
+  } else {
+    const auto bracket = traj_->visualWheelBracket(
+      pending.start_ns, pending.end_ns, anchor_gap_ns);
+    if (bracket) {
+      const ScanMotionBracket motion_bracket{
+        bracket->start_stamp_ns, bracket->end_stamp_ns,
+        bracket->start_map_pose, bracket->end_map_pose,
+        bracket->start_wheel_pose, bracket->end_wheel_pose};
+      auto deskewed = ScanDeskewer::deskewBracketed(
+        scan, pending.base_to_lidar, *wheel_buf_, motion_bracket);
+      if (!deskewed || deskewed->rays.empty()) {
+        return PendingScanResult::kDropped;
+      }
+      local_rays = std::move(deskewed->rays);
+      archived_motion = ArchivedBracketedMotion{
+        bracket->start_frame_index, bracket->end_frame_index,
+        pending.base_to_lidar, std::move(deskewed->ray_motions)};
+      placement = traj_->placeBracketedScan(
+        pending.start_ns, pending.end_ns, anchor_gap_ns);
+    }
+  }
+
+  if (!placement) {
+    // Once wheel coverage is complete, wheel progress cannot make a valid
+    // delayed visual bracket impossible. Expire only when visual sensor time
+    // itself has advanced beyond the bounded waiting window.
+    const bool expired = advancedBeyond(
+      traj_->latestFrameStamp(), pending.end_ns, timeout_ns);
+    if (expired) {
+      ++scans_no_anchor_;
+      ++scans_timeout_dropped_;
+      publishDiagnostics("WARN", "scan dropped: visual anchor bracket timed out");
+      return PendingScanResult::kDropped;
+    }
+    return PendingScanResult::kWaiting;
+  }
+
   ArchivedScan archived;
-  archived.scan_id  = scan_pose.scan_id;
-  archived.stamp_ns = stamp_ns;
-  archived.rays     = local_rays;
+  archived.scan_id = placement->scan_id;
+  archived.stamp_ns = pending.start_ns;
+  archived.rays = local_rays;
+  archived.bracketed_motion = std::move(archived_motion);
   archive_->scans.push_back(archived);
 
-  if (scan_pose.committed && !was_lost_) {
-    if (committed_scan_ids_.find(scan_pose.scan_id) == committed_scan_ids_.end()) {
-      rebuilder_->appendCommitted(archived, scan_pose, last_graph_revision_);
-      committed_scan_ids_.insert(scan_pose.scan_id);
+  if (placement->committed) {
+    if (committed_scan_ids_.find(placement->scan_id) == committed_scan_ids_.end()) {
+      rebuilder_->appendCommitted(archived, *placement, last_graph_revision_);
+      committed_scan_ids_.insert(placement->scan_id);
     }
     ++scans_committed_;
-    publishCommittedScanMarker(local_rays, scan_pose.pose, stamp_ns);
+    publishCommittedScanMarker(local_rays, placement->pose, pending.start_ns);
   } else {
-    // Provisional (lost or not yet committed).
     ++scans_provisional_;
-    publishProvisionalScanMarker(local_rays, scan_pose.pose, stamp_ns);
+    publishProvisionalScanMarker(local_rays, placement->pose, pending.start_ns);
   }
+  return PendingScanResult::kProcessed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -416,9 +662,12 @@ void MapperNode::publishMapAndRevision(std::shared_ptr<const MapSnapshot> snapsh
                                         const RebuildStatus& status) {
   if (!snapshot) return;
 
+  mapper_node_test_hooks::beforePublish();
+
+  const auto publish_stamp = now();
   nav_msgs::msg::OccupancyGrid grid;
   grid.header.frame_id = map_frame_;
-  grid.header.stamp    = now();
+  grid.header.stamp    = publish_stamp;
   grid.info.resolution = static_cast<float>(snapshot->grid.resolution_m);
   grid.info.width      = snapshot->grid.width;
   grid.info.height     = snapshot->grid.height;
@@ -430,7 +679,7 @@ void MapperNode::publishMapAndRevision(std::shared_ptr<const MapSnapshot> snapsh
 
   orb_slam3_msgs::msg::MapRevision rev;
   rev.header.frame_id = map_frame_;
-  rev.header.stamp    = now();
+  rev.header.stamp    = publish_stamp;
   switch (status.state) {
     case RebuildState::kIdle:      rev.state = orb_slam3_msgs::msg::MapRevision::IDLE;      break;
     case RebuildState::kBuilding:  rev.state = orb_slam3_msgs::msg::MapRevision::BUILDING;  break;
@@ -444,6 +693,7 @@ void MapperNode::publishMapAndRevision(std::shared_ptr<const MapSnapshot> snapsh
   rev.duration_ms         = status.duration_ms;
   rev.detail              = status.detail;
   map_rev_pub_->publish(rev);
+  mapper_node_test_hooks::afterPublish();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -571,6 +821,8 @@ void MapperNode::publishDiagnostics(const std::string& level, const std::string&
   add_kv("scans_no_anchor", scans_no_anchor_.load());
   add_kv("scans_committed", scans_committed_.load());
   add_kv("scans_provisional", scans_provisional_.load());
+  add_kv("scans_turn_rejected", scans_turn_rejected_.load());
+  add_kv("scans_timeout_dropped", scans_timeout_dropped_.load());
 
   array.status.push_back(status);
   diagnostics_pub_->publish(array);

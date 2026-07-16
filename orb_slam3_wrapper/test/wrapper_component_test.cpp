@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <opencv2/core/mat.hpp>
+#include <opencv2/core/utility.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -254,6 +255,12 @@ TEST_F(WrapperComponentTest, CorrectedImageFramesPermitConfigurationRetry) {
   node->processStereoForTest(left, right);
   EXPECT_EQ(backend_ptr->configure_calls, 2);
   EXPECT_EQ(backend_ptr->track_calls, 1);
+}
+
+TEST_F(WrapperComponentTest, OpenCvThreadCountDefaultsToFourAndIsConfigurable) {
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::make_unique<FakeBackend>());
+  EXPECT_EQ(node->get_parameter("opencv_num_threads").as_int(), 4);
+  EXPECT_EQ(cv::getNumThreads(), 4);
 }
 
 }  // namespace

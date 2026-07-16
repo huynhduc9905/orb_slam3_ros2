@@ -13,7 +13,6 @@ setup(
             "share/" + package_name + "/config",
             [
                 "config/tasterobot_bag.yaml",
-                "config/read_only_bridge.yaml",
             ],
         ),
         (
@@ -21,6 +20,14 @@ setup(
             [
                 "launch/bag_replay.launch.py",
                 "launch/dashboard.launch.py",
+            ],
+        ),
+        (
+            "share/" + package_name + "/web",
+            [
+                "web/index.html",
+                "web/app.js",
+                "web/style.css",
             ],
         ),
     ],
@@ -39,6 +46,7 @@ setup(
     entry_points={
         "console_scripts": [
             "odom_tf_adapter = orb_slam_bringup.odom_tf_adapter:main",
+            "dashboard_server = orb_slam_bringup.dashboard_server:main",
             "tf_audit = orb_slam_bringup.tf_audit:main",
             "metrics_recorder = orb_slam_bringup.metrics_recorder:main",
             "orb_slam_report_check = orb_slam_bringup.report:check_main",

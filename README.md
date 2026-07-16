@@ -14,7 +14,7 @@ frame-parameterized.
 | `orb_slam3_msgs` | Custom messages (TrackedFrame, GraphSnapshot, MapRevision, …) |
 | `orb_slam3_wrapper` | ROS 2 wrapper around ORB-SLAM3 stereo tracking |
 | `orb_lidar_mapper` | ORB-corrected 2D lidar occupancy mapper |
-| `orb_slam_bringup` | Bag replay, TF audit, metrics, report, read-only bridge launch |
+| `orb_slam_bringup` | Bag replay, trusted TF audit, metrics, report, direct dashboard launch |
 | `orb_slam_dashboard` | Read-only React/PixiJS map-first dashboard |
 
 ## Build (Nix + colcon)
@@ -48,6 +48,8 @@ COLCON_DEFAULTS_FILE=/dev/null colcon test \
 colcon test-result --verbose
 ```
 
+Current full-suite result: **321 tests, 0 errors, 0 failures, 0 skipped**.
+
 ## Full bag replay
 
 Immutable bag fixture: `/home/duc/robot/20260713_152907` (~221 s).
@@ -57,7 +59,7 @@ source install/setup.bash
 ROS_DOMAIN_ID=79 ros2 launch orb_slam_bringup bag_replay.launch.py \
   bag_path:=/home/duc/robot/20260713_152907 \
   artifact_dir:=$PWD/artifacts/run-1 \
-  rate:=1.0 start_dashboard:=true dashboard_host:=100.102.92.45
+  rate:=1.0 start_dashboard:=true dashboard_host:=0.0.0.0
 ```
 
 Launch arguments: `bag_path`, `artifact_dir`, `rate`, `ros_domain_id`,
@@ -80,13 +82,16 @@ The launch:
 With `start_dashboard:=true` the launch prints:
 
 ```text
-http://<dashboard_host>:51871/?ws=ws://<dashboard_host>:8765
+http://<dashboard_host>:51871/
 ```
 
-Phase-1 default Tailscale host: `100.102.92.45`. The HTTP server and
-foxglove_bridge bind to the configured host; capabilities are locked down
-(empty) so the dashboard is observational only — no publish, service, or
-parameter write.
+Bind `dashboard_host:=0.0.0.0` for LAN/Tailscale access and open
+`http://100.102.92.45:51871/` from a Tailscale-connected machine. There is no
+`?ws=` query. Foxglove and `foxglove_bridge` are intentionally ignored/disabled
+for now: measured visual tracking was approximately 5 Hz through the bridge
+versus approximately 30 Hz through the direct dashboard. The supported
+dashboard is the read-only in-graph HTTP server; do not source or launch a
+Foxglove bridge for this path.
 
 ### Artifacts and report
 
@@ -124,21 +129,31 @@ dimensions and revision counts are not required — multi-threaded ORB-SLAM3
 is non-deterministic and produces different but equally-valid maps run to
 run.
 
-## Committed vs provisional scans
+## Scan and dashboard lifecycle
 
 - **Committed** scans enter the occupancy grid. They are placed while ORB
   tracking is healthy (OK) and the active atlas map is connected.
 - **Provisional** scans are shown as yellow markers during visual loss and are
-  excluded from the committed map. On relocalization / loop correction the
-  mapper rebuilds the grid atomically from archived scans and corrected graph
-  poses, then deletes the provisional markers.
+  excluded from the committed map. LOST scans remain provisional while the
+  interval is unresolved. After successful recovery, the mapper rebuilds from
+  corrected anchors and commits the interval only after that rebuild publishes.
+- The dashboard receives a revisioned corrected path, not an append-only raw
+  path. Its yellow fallback is only the current loss interval and is cleared
+  after coherent successful recovery publication.
+- RPLidar NaN and infinity sectors are intentionally ignored: they provide
+  neither clearing evidence nor occupied evidence because filtered angles use
+  invalid values. Adjacent finite beams retain normal behavior.
+- Recorded `/tf_static` is trusted. The package is independent of the
+  `tasteRobot2` package and the immutable bag fixture.
 
 ## Phase 1 limitation
 
 Candidate outputs are namespaced under `orb_map` and `/orb_lidar/*` /
 `/orb_slam3/*`. Phase 1 does **not** publish canonical `/map` or `map→odom`,
 and does **not** control Nav2. The dashboard and map are observational
-candidates for offline evaluation.
+candidates for offline evaluation. The package is independent of `tasteRobot2`;
+the immutable bag is `/home/duc/robot/20260713_152907`, and recorded
+`/tf_static` is trusted while replay adds only verified missing mounts.
 
 ## Known residual
 

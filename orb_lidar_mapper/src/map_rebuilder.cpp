@@ -7,6 +7,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,7 +27,39 @@ Point2 transform(const Pose2& pose, Point2 point) {
           pose.y + sine * point.x + cosine * point.y};
 }
 
-std::vector<Ray2> transformed(const ArchivedScan& scan, const ScanPose& pose) {
+std::vector<Ray2> transformed(
+  const ArchivedScan& scan, const ScanPose& pose,
+  const TrajectoryRevision* trajectory = nullptr) {
+  if (scan.bracketed_motion && trajectory) {
+    const ArchivedBracketedMotion& motion = *scan.bracketed_motion;
+    if (motion.start_frame_index >= trajectory->frames.size() ||
+        motion.end_frame_index >= trajectory->frames.size()) {
+      return {};
+    }
+    const FrameAnchor& start = trajectory->frames[motion.start_frame_index];
+    const FrameAnchor& end = trajectory->frames[motion.end_frame_index];
+    if (!start.pose_valid || !end.pose_valid || !start.wheel_pose || !end.wheel_pose ||
+        start.map_id != end.map_id || start.graph_revision != end.graph_revision) {
+      return {};
+    }
+
+    const Pose2 predicted_end = start.map_pose *
+      start.wheel_pose->inverse() * *end.wheel_pose;
+    const Pose2 residual = predicted_end.inverse() * end.map_pose;
+    std::vector<Ray2> result;
+    result.reserve(motion.rays.size());
+    for (const RayMotion2& ray : motion.rays) {
+      const Pose2 base_pose = start.map_pose * start.wheel_pose->inverse() *
+        ray.wheel_pose * residual.pow(ray.alpha);
+      const Pose2 lidar_pose = base_pose * motion.base_to_lidar;
+      result.push_back({
+        transform(lidar_pose, Point2{}),
+        transform(lidar_pose, ray.lidar_end),
+        ray.has_hit});
+    }
+    return result;
+  }
+
   std::vector<Ray2> result;
   result.reserve(scan.rays.size());
   for (const Ray2& ray : scan.rays) {
@@ -162,7 +195,13 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         if (cancelled(request)) return;
         const auto found = poses.find(scan.scan_id);
         if (found != poses.end() && found->second->committed) {
-          candidate_grid->insert(transformed(scan, *found->second));
+          auto rebuilt_rays = transformed(
+            scan, *found->second, request.trajectory.get());
+          if (scan.bracketed_motion && rebuilt_rays.empty()) {
+            throw std::runtime_error(
+              "archived bracketed motion is incompatible with trajectory");
+          }
+          candidate_grid->insert(rebuilt_rays);
           applied.insert(scan.scan_id);
           ++committed;
         }

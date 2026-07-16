@@ -16,6 +16,13 @@ FrameAnchor makeOkFrame(std::int64_t stamp_ns, Pose2 pose, std::uint64_t map_id,
   return {stamp_ns, TrackingState::kOk, true, map_id, keyframe_id, pose, Pose2{}, wheel_pose};
 }
 
+void addSweepWheels(TrajectoryStore& store) {
+  EXPECT_TRUE(store.addWheel({900'000'000, Pose2{0.0, 0.0, 0.0}}));
+  EXPECT_TRUE(store.addWheel({1'000'000'000, Pose2{1.0, 0.0, 0.0}}));
+  EXPECT_TRUE(store.addWheel({1'100'000'000, Pose2{2.0, 0.0, 0.0}}));
+  EXPECT_TRUE(store.addWheel({1'200'000'000, Pose2{3.0, 0.0, 0.0}}));
+}
+
 TEST(TrajectoryStore, PlacesScanFromVisualAnchorAndRelativeWheelMotion) {
   TrajectoryStore store(defaultTrajectoryConfig());
   EXPECT_TRUE(store.addWheel({100'000'000, Pose2{1, 0, 0}}));
@@ -166,12 +173,139 @@ TEST(TrajectoryStore, UsesCumulativeWheelDistanceForCorrectionFraction) {
   EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{4.0 / 3.0, 0, 0}, 1e-12));
 }
 
-TEST(TrajectoryStore, RejectsMissingWheelPlacementWithoutStateCorruption) {
+TEST(TrajectoryStore, ReturnsCompatibleVisualWheelBracketForFullSweep) {
   TrajectoryStore store(defaultTrajectoryConfig());
-  store.addTrackedFrame(makeOkFrame(0, Pose2{}, 7, 1));
-  EXPECT_FALSE(store.placeScan(100).has_value());
-  EXPECT_TRUE(store.snapshot()->scans.empty());
+  addSweepWheels(store);
+  store.addTrackedFrame(makeOkFrame(900'000'000, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame(makeOkFrame(1'200'000'000, Pose2{3.0, 0.0, 0.0}, 7, 2,
+                                     Pose2{3.0, 0.0, 0.0}));
+
+  const auto bracket = store.visualWheelBracket(1'000'000'000LL,
+                                                 1'100'000'000LL,
+                                                 200'000'000LL);
+  ASSERT_TRUE(bracket);
+  EXPECT_EQ(bracket->start_frame_index, 0U);
+  EXPECT_EQ(bracket->end_frame_index, 1U);
+}
+
+TEST(TrajectoryStore, RejectsVisualWheelBracketWhenEndpointGapExceedsLimitByOneNanosecond) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  addSweepWheels(store);
+  store.addTrackedFrame(makeOkFrame(799'999'999, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame(makeOkFrame(1'200'000'000, Pose2{3.0, 0.0, 0.0}, 7, 2,
+                                     Pose2{3.0, 0.0, 0.0}));
+
+  EXPECT_FALSE(store.visualWheelBracket(1'000'000'000LL, 1'100'000'000LL,
+                                         200'000'000LL));
+}
+
+TEST(TrajectoryStore, RejectsVisualWheelBracketAcrossLostFrame) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  addSweepWheels(store);
+  store.addTrackedFrame(makeOkFrame(900'000'000, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame({1'050'000'000, TrackingState::kLost, false, 7, 1,
+                         Pose2{}, Pose2{}, Pose2{1.5, 0.0, 0.0}});
+  store.addTrackedFrame(makeOkFrame(1'200'000'000, Pose2{3.0, 0.0, 0.0}, 7, 2,
+                                     Pose2{3.0, 0.0, 0.0}));
+
+  EXPECT_FALSE(store.visualWheelBracket(1'000'000'000LL, 1'100'000'000LL,
+                                         200'000'000LL));
+}
+
+TEST(TrajectoryStore, RejectsVisualWheelBracketAcrossMapTransition) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  addSweepWheels(store);
+  store.addTrackedFrame(makeOkFrame(900'000'000, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame(makeOkFrame(1'200'000'000, Pose2{3.0, 0.0, 0.0}, 8, 2,
+                                     Pose2{3.0, 0.0, 0.0}));
+
+  EXPECT_FALSE(store.visualWheelBracket(1'000'000'000LL, 1'100'000'000LL,
+                                         200'000'000LL));
+}
+
+TEST(TrajectoryStore, RejectsVisualWheelBracketAcrossGraphRevisionTransition) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  addSweepWheels(store);
+  store.addTrackedFrame(makeOkFrame(900'000'000, Pose2{}, 7, 1, Pose2{}));
+  FrameAnchor end = makeOkFrame(1'200'000'000, Pose2{3.0, 0.0, 0.0}, 7, 2,
+                                 Pose2{3.0, 0.0, 0.0});
+  end.graph_revision = 1;
+  store.addTrackedFrame(end);
+
+  EXPECT_FALSE(store.visualWheelBracket(1'000'000'000LL, 1'100'000'000LL,
+                                         200'000'000LL));
+}
+
+TEST(TrajectoryStore, BracketedScanRecomputesAfterReferencedKeyframeMoves) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  ASSERT_TRUE(store.addWheel({0, Pose2{}}));
+  ASSERT_TRUE(store.addWheel({50'000'000, Pose2{0.5, 0.0, 0.0}}));
+  ASSERT_TRUE(store.addWheel({100'000'000, Pose2{1.0, 0.0, 0.0}}));
+  store.addTrackedFrame(makeOkFrame(0, Pose2{}, 7, 1, Pose2{}));
+  store.addTrackedFrame(makeOkFrame(100'000'000, Pose2{1.0, 0.0, 0.0}, 7, 2,
+                                     Pose2{1.0, 0.0, 0.0}));
+  ASSERT_TRUE(store.placeBracketedScan(50'000'000, 100'000'000, 100'000'000LL));
+  const auto before_move = store.snapshot()->scans.front().pose;
+
+  ASSERT_TRUE(store.applyGraphSnapshot({1, 7, true,
+    {{1, 7, Pose2{}}, {2, 7, Pose2{3.0, 0.0, 0.0}}}}));
+  const auto after_move = store.snapshot()->scans.front();
+  EXPECT_TRUE(after_move.committed);
+  EXPECT_TRUE(after_move.pose.isApprox(Pose2{1.5, 0.0, 0.0}, 1e-12));
+  EXPECT_FALSE(after_move.pose.isApprox(before_move, 1e-12));
+}
+
+// Deviation from earlier design: a valid OK/pose_valid visual anchor now
+// places a scan via nearest-anchor snap even when wheel odometry is entirely
+// unavailable, rather than rejecting the scan outright. ORB-SLAM3's visual
+// pose is the primary/authoritative source; wheel odometry only bridges an
+// anchor to a scan's exact sub-anchor timestamp when available. See handoff
+// "Nearest-anchor snap" fix.
+TEST(TrajectoryStore, NearestAnchorSnapPlacesScanWhenWheelDataIsMissingEntirely) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  store.addTrackedFrame(makeOkFrame(0, Pose2{4, 1, 0.2}, 7, 1));
+  const auto placement = store.placeScan(100);
+  ASSERT_TRUE(placement.has_value())
+      << "OK visual anchor should still place a scan via nearest-anchor snap "
+         "when wheel odometry is entirely unavailable";
+  EXPECT_TRUE(placement->pose.isApprox(Pose2{4, 1, 0.2}, 1e-12));
+  EXPECT_TRUE(placement->committed);
   EXPECT_EQ(store.unresolvedScanCount(), 0U);
+}
+
+// Mirrors the live mapper_node.cpp scenario: the anchor itself was ingested
+// without a wheel bridge (e.g. wheel interpolation failed at the tracked-frame
+// timestamp due to timing skew), even though wheel data exists for later
+// scan timestamps. The anchor's visual pose is used directly (no partial
+// bridging attempt) rather than dropping the scan.
+TEST(TrajectoryStore, NearestAnchorSnapPlacesScanWhenAnchorWheelPoseIsMissing) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  ASSERT_TRUE(store.addWheel({100'000'000, Pose2{1, 0, 0}}));
+  const FrameAnchor anchor{0, TrackingState::kOk, true, 7, 3,
+                           Pose2{10, 5, 0}, Pose2{}, std::nullopt};
+  store.addTrackedFrame(anchor);
+
+  const auto placement = store.placeScan(100'000'000);
+  ASSERT_TRUE(placement.has_value());
+  EXPECT_TRUE(placement->pose.isApprox(Pose2{10, 5, 0}, 1e-12));
+  EXPECT_TRUE(placement->committed);
+}
+
+// The nearest-anchor-snap fallback must also hold after a graph-snapshot
+// correction recomputes the anchor's map_pose (recomputeScan's anchor_frame
+// branch), not just at initial placement time.
+TEST(TrajectoryStore, GraphSnapshotRecomputeKeepsNearestAnchorSnapWhenWheelPoseIsMissing) {
+  TrajectoryStore store(defaultTrajectoryConfig());
+  const FrameAnchor anchor{0, TrackingState::kOk, true, 7, 3,
+                           Pose2{1, 0, 0}, Pose2{}, std::nullopt};
+  store.addTrackedFrame(anchor);
+  ASSERT_TRUE(store.placeScan(0).has_value());
+
+  ASSERT_TRUE(store.applyGraphSnapshot({10, 7, true, {{3, 7, Pose2{2, 0, 0}}}}));
+  const auto revision = store.snapshot();
+  ASSERT_EQ(revision->scans.size(), 1U);
+  EXPECT_TRUE(revision->scans[0].committed);
+  EXPECT_TRUE(revision->scans[0].pose.isApprox(Pose2{2, 0, 0}, 1e-12));
 }
 
 TEST(TrajectoryStore, GraphSnapshotRecomputesFramesAndClosedIntervals) {

@@ -5,13 +5,22 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <initializer_list>
 #include <memory>
+#include <limits>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -29,6 +38,16 @@
 #include "orb_lidar_mapper/mapper_node.hpp"
 
 namespace orb_lidar_mapper {
+
+namespace mapper_node_test_hooks {
+void armPublishBarrier();
+bool waitForPublishBarrier(std::chrono::milliseconds timeout);
+bool waitForDestructorEntry(std::chrono::milliseconds timeout);
+void releasePublishBarrier();
+bool publishCompleted();
+void resetPublishBarrier();
+}  // namespace mapper_node_test_hooks
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -38,6 +57,10 @@ using namespace std::chrono_literals;
 // ---------------------------------------------------------------------------
 
 rclcpp::Time t(int sec) { return rclcpp::Time(sec, 0, RCL_ROS_TIME); }
+
+rclcpp::Time tn(std::int64_t nanoseconds) {
+  return rclcpp::Time(nanoseconds, RCL_ROS_TIME);
+}
 
 std_msgs::msg::Header hdr(int sec, const std::string& frame = "orb_map") {
   std_msgs::msg::Header h;
@@ -54,6 +77,16 @@ nav_msgs::msg::Odometry odom(int sec, double x) {
   return msg;
 }
 
+nav_msgs::msg::Odometry odom_ns(std::int64_t stamp_ns, double x, double yaw = 0.0) {
+  nav_msgs::msg::Odometry msg;
+  msg.header.stamp = tn(stamp_ns);
+  msg.header.frame_id = "odom";
+  msg.pose.pose.position.x = x;
+  msg.pose.pose.orientation.w = std::cos(yaw * 0.5);
+  msg.pose.pose.orientation.z = std::sin(yaw * 0.5);
+  return msg;
+}
+
 sensor_msgs::msg::LaserScan make_scan(int sec, float range = 3.0f, int rays = 360) {
   sensor_msgs::msg::LaserScan msg;
   msg.header = hdr(sec, "base_scan");
@@ -64,6 +97,21 @@ sensor_msgs::msg::LaserScan make_scan(int sec, float range = 3.0f, int rays = 36
   msg.range_min = 0.1f;
   msg.range_max = 15.0f;
   msg.ranges.assign(rays, range);
+  return msg;
+}
+
+sensor_msgs::msg::LaserScan sweep(
+    std::int64_t start_ns, float time_increment,
+    std::initializer_list<float> ranges) {
+  sensor_msgs::msg::LaserScan msg;
+  msg.header.stamp = tn(start_ns);
+  msg.header.frame_id = "base_scan";
+  msg.angle_min = -0.1F;
+  msg.angle_increment = 0.1F;
+  msg.time_increment = time_increment;
+  msg.range_min = 0.1F;
+  msg.range_max = 20.0F;
+  msg.ranges.assign(ranges);
   return msg;
 }
 
@@ -82,6 +130,14 @@ orb_slam3_msgs::msg::TrackedFrame make_tracked(int sec, uint8_t state, bool pose
   msg.pose.position.x = x;
   msg.pose.orientation.w = 1.0;
   msg.reference_to_frame.rotation.w = 1.0;
+  return msg;
+}
+
+orb_slam3_msgs::msg::TrackedFrame tracked_ns(
+    std::int64_t stamp_ns, uint8_t state, bool pose_valid, double x,
+    uint64_t map_id, uint64_t kf_id, uint64_t graph_rev) {
+  auto msg = make_tracked(0, state, pose_valid, x, map_id, kf_id, graph_rev);
+  msg.header.stamp = tn(stamp_ns);
   return msg;
 }
 
@@ -166,6 +222,7 @@ protected:
 
     auto sensor_qos  = rclcpp::SensorDataQoS();
     auto reliable_tl = rclcpp::QoS(1).reliable().transient_local();
+    auto map_history_qos = rclcpp::QoS(10).reliable().transient_local();
     auto reliable    = rclcpp::QoS(100).reliable();
     auto reliable10  = rclcpp::QoS(10).reliable();
 
@@ -179,12 +236,22 @@ protected:
         "/orb_slam3/events", reliable);
 
     map_sub_ = helper_->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "/orb_lidar/map", reliable_tl,
-        [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) { last_map_ = msg; });
+        "/orb_lidar/map", map_history_qos,
+        [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) {
+          last_map_ = msg;
+          map_stamps_.push_back(msg->header.stamp);
+          maps_.push_back(*msg);
+        });
     map_rev_sub_ = helper_->create_subscription<orb_slam3_msgs::msg::MapRevision>(
-        "/orb_lidar/map_revision", reliable_tl,
+        "/orb_lidar/map_revision", map_history_qos,
         [this](orb_slam3_msgs::msg::MapRevision::ConstSharedPtr msg) {
-          last_map_revision_ = msg; ++map_rev_count_;
+          last_map_revision_ = msg;
+          map_revision_stamps_.push_back(msg->header.stamp);
+          map_revisions_.push_back(*msg);
+          if (msg->state == orb_slam3_msgs::msg::MapRevision::PUBLISHED) {
+            last_published_map_revision_ = msg;
+          }
+          ++map_rev_count_;
         });
     prov_sub_ = helper_->create_subscription<visualization_msgs::msg::Marker>(
         "/orb_lidar/provisional_scan", reliable10,
@@ -197,6 +264,11 @@ protected:
     corr_path_sub_ = helper_->create_subscription<nav_msgs::msg::Path>(
         "/orb_lidar/corrected_path", reliable_tl,
         [this](nav_msgs::msg::Path::ConstSharedPtr msg) { last_corr_path_ = msg; });
+    diagnostics_sub_ = helper_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+        "/diagnostics", reliable10,
+        [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) {
+          diagnostics_.push_back(msg);
+        });
 
     // Create fresh MapperNode — default parameters use the global topic names above.
     mapper_ = std::make_shared<MapperNode>();
@@ -206,6 +278,8 @@ protected:
   }
 
   void TearDown() override {
+    mapper_node_test_hooks::releasePublishBarrier();
+    mapper_node_test_hooks::resetPublishBarrier();
     mapper_.reset();
     helper_.reset();
     tf_bcast_.reset();
@@ -215,6 +289,142 @@ protected:
     for (int s = from_sec; s <= to_sec; ++s) {
       odom_pub_->publish(odom(s, s * x_per_sec));
     }
+  }
+
+  void publishStraightSweepWithTwoVisualAnchors() {
+    constexpr std::int64_t kStartNs = 2'000'000'000LL;
+    const uint64_t revision = graph_rev_base_ + 1u;
+    endpoint_counts_before_sweep_ = endpointCounts();
+    for (int i = -1; i <= 3; ++i) {
+      odom_pub_->publish(odom_ns(kStartNs + i * 50'000'000LL, 0.01 * i));
+    }
+    spinFlush(mapper_, helper_, 200ms);
+    tracked_pub_->publish(tracked_ns(1'950'000'000LL,
+        orb_slam3_msgs::msg::TrackedFrame::OK, true, -0.01, 1, 1, revision));
+    spinFlush(mapper_, helper_, 100ms);
+    tracked_pub_->publish(tracked_ns(2'150'000'000LL,
+        orb_slam3_msgs::msg::TrackedFrame::OK, true, 0.03, 1, 1, revision));
+    spinFlush(mapper_, helper_, 100ms);
+    graph_pub_->publish(make_graph(3, revision, 1));
+    spinFlush(mapper_, helper_, 300ms);
+    scan_pub_->publish(sweep(kStartNs, 0.05F, {2.0F, 2.0F, 2.0F}));
+    // Drive a corrected rebuild after the queued sweep has been accepted. This
+    // exercises the same publication pair without racing its first incremental
+    // worker wake-up against test teardown.
+    spinFlush(mapper_, helper_, 200ms);
+    graph_pub_->publish(make_graph(3, revision + 1u, 1));
+    spinFlush(mapper_, helper_, 200ms);
+  }
+
+  void publishSweepWheelCoverage(double middle_yaw = 0.0, double final_yaw = 0.0,
+                                 bool include_final = true, double x_step = 0.01) {
+    constexpr std::int64_t kStartNs = 2'000'000'000LL;
+    odom_pub_->publish(odom_ns(1'950'000'000LL, -x_step, 0.0));
+    odom_pub_->publish(odom_ns(kStartNs, 0.0, 0.0));
+    odom_pub_->publish(odom_ns(2'050'000'000LL, x_step, middle_yaw));
+    if (include_final) {
+      odom_pub_->publish(odom_ns(2'100'000'000LL, 2.0 * x_step, final_yaw));
+      odom_pub_->publish(odom_ns(2'150'000'000LL, 3.0 * x_step, final_yaw));
+    }
+  }
+
+  void publishVisualBracket(uint64_t revision, bool include_end = true,
+                            double x_step = 0.01) {
+    tracked_pub_->publish(tracked_ns(1'950'000'000LL,
+        orb_slam3_msgs::msg::TrackedFrame::OK, true, -x_step, 1, 1, revision));
+    if (include_end) {
+      tracked_pub_->publish(tracked_ns(2'150'000'000LL,
+          orb_slam3_msgs::msg::TrackedFrame::OK, true, 3.0 * x_step, 1, 1, revision));
+    }
+    graph_pub_->publish(make_graph(3, revision, 1));
+  }
+
+  void publishPreparedSweep(uint64_t revision, double middle_yaw = 0.0,
+                            double final_yaw = 0.0, double x_step = 0.01) {
+    publishSweepWheelCoverage(middle_yaw, final_yaw, true, x_step);
+    publishVisualBracket(revision, true, x_step);
+    spinFlush(mapper_, helper_, 200ms);
+    scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  }
+
+  bool waitForCommittedScanCount(uint32_t count,
+                                 std::chrono::milliseconds timeout = 4000ms) {
+    return spinUntil2(mapper_, helper_, [this, count] {
+      return last_map_revision_ && last_map_revision_->committed_scan_count >= count;
+    }, timeout);
+  }
+
+  std::optional<uint64_t> latestDiagnosticValue(const std::string& key) const {
+    for (auto array = diagnostics_.rbegin(); array != diagnostics_.rend(); ++array) {
+      for (const auto& status : (*array)->status) {
+        for (const auto& value : status.values) {
+          if (value.key == key) return std::stoull(value.value);
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  bool waitForDiagnosticAtLeast(const std::string& key, uint64_t value,
+                                std::chrono::milliseconds timeout = 4000ms) {
+    return spinUntil2(mapper_, helper_, [this, &key, value] {
+      const auto current = latestDiagnosticValue(key);
+      return current && *current >= value;
+    }, timeout);
+  }
+
+  void recreateMapper(const rclcpp::NodeOptions& options) {
+    mapper_.reset();
+    mapper_ = std::make_shared<MapperNode>(options);
+    spinFlush(mapper_, helper_, 200ms);
+  }
+
+  bool waitForPublishedMap(std::chrono::milliseconds timeout = 8000ms) {
+    return spinUntil2(mapper_, helper_, [this] {
+      return coherentPublishedMap().has_value();
+    }, timeout);
+  }
+
+  std::optional<nav_msgs::msg::OccupancyGrid> mapForRevision(
+      const orb_slam3_msgs::msg::MapRevision& revision) const {
+    const auto map = std::find_if(maps_.begin(), maps_.end(), [&revision](const auto& candidate) {
+      return candidate.header.stamp == revision.header.stamp;
+    });
+    if (map == maps_.end()) return std::nullopt;
+    return *map;
+  }
+
+  std::optional<nav_msgs::msg::OccupancyGrid> coherentPublishedMap() const {
+    for (auto revision = map_revisions_.rbegin(); revision != map_revisions_.rend(); ++revision) {
+      if (revision->state != orb_slam3_msgs::msg::MapRevision::PUBLISHED) continue;
+      const auto map = mapForRevision(*revision);
+      if (map) return map;
+    }
+    return std::nullopt;
+  }
+
+  std::string publicationHistory() const {
+    std::ostringstream out;
+    out << "maps=";
+    for (const auto& stamp : map_stamps_) out << stamp.sec << '.' << stamp.nanosec << ',';
+    out << " revisions=";
+    for (const auto& revision : map_revisions_) {
+      out << static_cast<int>(revision.state) << '@' << revision.header.stamp.sec <<
+        '.' << revision.header.stamp.nanosec << ',';
+    }
+    return out.str();
+  }
+
+  std::string endpointCounts() const {
+    std::ostringstream out;
+    out << " endpoints(odom=" << odom_pub_->get_subscription_count()
+        << ",tracked=" << tracked_pub_->get_subscription_count()
+        << ",scan=" << scan_pub_->get_subscription_count()
+        << ",graph=" << graph_pub_->get_subscription_count()
+        << ",event=" << event_pub_->get_subscription_count()
+        << ",map=" << mapper_->count_subscribers("/orb_lidar/map")
+        << ",revision=" << mapper_->count_subscribers("/orb_lidar/map_revision") << ')';
+    return out.str();
   }
 
   static inline int instance_id_{0};
@@ -234,15 +444,23 @@ protected:
   rclcpp::Subscription<visualization_msgs::msg::Marker>::SharedPtr prov_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr wheel_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr corr_path_sub_;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_sub_;
 
   std::shared_ptr<MapperNode> mapper_;
 
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr last_map_;
   orb_slam3_msgs::msg::MapRevision::ConstSharedPtr last_map_revision_;
+  orb_slam3_msgs::msg::MapRevision::ConstSharedPtr last_published_map_revision_;
   visualization_msgs::msg::Marker::ConstSharedPtr last_prov_;
   nav_msgs::msg::Path::ConstSharedPtr last_wheel_path_;
   nav_msgs::msg::Path::ConstSharedPtr last_corr_path_;
+  std::vector<diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr> diagnostics_;
   std::size_t map_rev_count_{0};
+  std::vector<builtin_interfaces::msg::Time> map_stamps_;
+  std::vector<builtin_interfaces::msg::Time> map_revision_stamps_;
+  std::vector<nav_msgs::msg::OccupancyGrid> maps_;
+  std::vector<orb_slam3_msgs::msg::MapRevision> map_revisions_;
+  std::string endpoint_counts_before_sweep_;
 };
 
 // ---------------------------------------------------------------------------
@@ -284,6 +502,115 @@ TEST_F(MapperNodeTest, OkTrackingProducesMapRevision1WithOccupiedAndFreeCells) {
   }
   EXPECT_TRUE(has_occ)  << "Map has no occupied cells";
   EXPECT_TRUE(has_free) << "Map has no free cells";
+}
+
+TEST_F(MapperNodeTest, PublishedMapAndRevisionUseOnePairingStamp) {
+  publishStraightSweepWithTwoVisualAnchors();
+  ASSERT_TRUE(waitForPublishedMap()) << endpoint_counts_before_sweep_ << ' ' << publicationHistory();
+  ASSERT_TRUE(last_map_);
+  ASSERT_TRUE(last_published_map_revision_);
+  EXPECT_EQ(last_published_map_revision_->state,
+            orb_slam3_msgs::msg::MapRevision::PUBLISHED);
+  const auto paired_map = mapForRevision(*last_published_map_revision_);
+  ASSERT_TRUE(paired_map.has_value()) << publicationHistory();
+  EXPECT_EQ(paired_map->header.stamp, last_published_map_revision_->header.stamp);
+}
+
+TEST_F(MapperNodeTest, StationaryFullSweepCommits) {
+  publishPreparedSweep(graph_rev_base_ + 1u, 0.0, 0.0, 0.0);
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+}
+
+TEST_F(MapperNodeTest, StraightFullSweepCommits) {
+  publishPreparedSweep(graph_rev_base_ + 1u, 0.0, 0.0);
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+}
+
+TEST_F(MapperNodeTest, MaximumYawExcursionAtLimitCommits) {
+  publishPreparedSweep(graph_rev_base_ + 1u, 0.005, 0.005);
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+}
+
+TEST_F(MapperNodeTest, YawExcursionAboveLimitRejectsWithoutMapRevisionChange) {
+  publishPreparedSweep(graph_rev_base_ + 1u, 0.005001, 0.005001);
+  ASSERT_TRUE(waitForDiagnosticAtLeast("scans_turn_rejected", 1));
+  EXPECT_EQ(map_rev_count_, 0u);
+}
+
+TEST_F(MapperNodeTest, TurnThenReturnExcursionRejectsWithoutMapRevisionChange) {
+  publishPreparedSweep(graph_rev_base_ + 1u, 0.006, 0.0);
+  ASSERT_TRUE(waitForDiagnosticAtLeast("scans_turn_rejected", 1));
+  EXPECT_EQ(map_rev_count_, 0u);
+}
+
+TEST_F(MapperNodeTest, MissingFinalWheelCoverageWaitsThenCommits) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  publishSweepWheelCoverage(0.0, 0.0, false);
+  publishVisualBracket(revision);
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  const std::size_t revisions_before = map_rev_count_;
+  EXPECT_FALSE(spinUntil2(mapper_, helper_, [this, revisions_before] {
+    return map_rev_count_ != revisions_before;
+  }, 300ms));
+
+  odom_pub_->publish(odom_ns(2'100'000'000LL, 0.02));
+  odom_pub_->publish(odom_ns(2'150'000'000LL, 0.03));
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+}
+
+TEST_F(MapperNodeTest, MissingVisualEndAnchorWaitsThenCommits) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  publishSweepWheelCoverage();
+  publishVisualBracket(revision, false);
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  const std::size_t revisions_before = map_rev_count_;
+  EXPECT_FALSE(spinUntil2(mapper_, helper_, [this, revisions_before] {
+    return map_rev_count_ != revisions_before;
+  }, 300ms));
+
+  tracked_pub_->publish(tracked_ns(2'150'000'000LL,
+      orb_slam3_msgs::msg::TrackedFrame::OK, true, 0.03, 1, 1, revision));
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+}
+
+TEST_F(MapperNodeTest, VisualTimeoutIncrementsNoAnchorAndTimeoutDropped) {
+  publishSweepWheelCoverage();
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  tracked_pub_->publish(tracked_ns(4'200'000'000LL,
+      orb_slam3_msgs::msg::TrackedFrame::OK, true, 0.0, 1, 1, graph_rev_base_ + 1u));
+  ASSERT_TRUE(waitForDiagnosticAtLeast("scans_no_anchor", 1));
+  ASSERT_TRUE(waitForDiagnosticAtLeast("scans_timeout_dropped", 1));
+}
+
+TEST_F(MapperNodeTest, PendingQueueLimitDropsOldestAndRemainsBounded) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("pending_scan_limit", 2)});
+  recreateMapper(options);
+  publishSweepWheelCoverage();
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  scan_pub_->publish(sweep(2'050'000'000LL, 0.025F, {2.0F, 2.0F, 2.0F}));
+  scan_pub_->publish(sweep(2'075'000'000LL, 0.0125F, {2.0F, 2.0F, 2.0F}));
+  ASSERT_TRUE(waitForDiagnosticAtLeast("scans_timeout_dropped", 1));
+
+  const uint64_t revision = graph_rev_base_ + 1u;
+  publishVisualBracket(revision);
+  ASSERT_TRUE(waitForCommittedScanCount(2));
+  EXPECT_EQ(latestDiagnosticValue("scans_timeout_dropped"), std::optional<uint64_t>(1));
+
+  graph_pub_->publish(make_graph(4, revision + 1u, 1));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_corr_path_ && last_corr_path_->poses.size() == 2u;
+  }));
+  const std::set<std::int64_t> retained_stamps{
+    rclcpp::Time(last_corr_path_->poses[0].header.stamp).nanoseconds(),
+    rclcpp::Time(last_corr_path_->poses[1].header.stamp).nanoseconds()};
+  EXPECT_EQ(retained_stamps,
+            (std::set<std::int64_t>{2'050'000'000LL, 2'075'000'000LL}));
+  EXPECT_EQ(retained_stamps.count(2'000'000'000LL), 0u);
+  ASSERT_TRUE(last_published_map_revision_);
+  EXPECT_EQ(last_published_map_revision_->committed_scan_count, 2u);
+  EXPECT_EQ(last_corr_path_->poses.size(), 2u)
+      << "queue must retain exactly two scans with no third pending item";
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +702,100 @@ TEST_F(MapperNodeTest, LostTrackingFreezesMapAndShowsProvisionalScanMarker) {
   // Map revision must NOT have advanced.
   EXPECT_EQ(last_map_revision_->map_revision, frozen_rev)
       << "Map revision advanced while LOST";
+}
+
+TEST_F(MapperNodeTest, LostEventBeforeTrackedLostFrameKeepsLossSweepUncommittedUntilRecovery) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  event_pub_->publish(make_event(2, orb_slam3_msgs::msg::TrackingEvent::LOST, revision));
+  spinFlush(mapper_, helper_, 100ms);
+  publishSweepWheelCoverage();
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  tracked_pub_->publish(tracked_ns(2'150'000'000LL,
+      orb_slam3_msgs::msg::TrackedFrame::LOST, false, 0.0, 1, 1, revision));
+
+  EXPECT_FALSE(waitForCommittedScanCount(1, 500ms));
+  EXPECT_EQ(map_rev_count_, 0u);
+}
+
+TEST_F(MapperNodeTest, TrackedLostFrameBeforeLostEventKeepsLossSweepUncommittedUntilRecovery) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  tracked_pub_->publish(tracked_ns(1'950'000'000LL,
+      orb_slam3_msgs::msg::TrackedFrame::LOST, false, 0.0, 1, 1, revision));
+  spinFlush(mapper_, helper_, 100ms);
+  event_pub_->publish(make_event(2, orb_slam3_msgs::msg::TrackingEvent::LOST, revision));
+  publishSweepWheelCoverage();
+  scan_pub_->publish(sweep(2'000'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+
+  EXPECT_FALSE(waitForCommittedScanCount(1, 500ms));
+  EXPECT_EQ(map_rev_count_, 0u);
+}
+
+TEST_F(MapperNodeTest, RecoveryKeepsExactMapUntilCorrectedRebuildPublishes) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  const uint64_t corrected_revision = revision + 1u;
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 200ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, revision));
+  graph_pub_->publish(make_graph(2, revision, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  scan_pub_->publish(make_scan(2, 2.0f));
+  ASSERT_TRUE(waitForCommittedScanCount(1));
+  ASSERT_TRUE(last_map_);
+  ASSERT_TRUE(last_published_map_revision_);
+  const auto old_map = mapForRevision(*last_published_map_revision_);
+  ASSERT_TRUE(old_map.has_value());
+  EXPECT_EQ(old_map->header.stamp, last_published_map_revision_->header.stamp);
+  const auto old_data = old_map->data;
+  const uint64_t old_map_revision = last_published_map_revision_->map_revision;
+
+  event_pub_->publish(make_event(3, orb_slam3_msgs::msg::TrackingEvent::LOST, revision));
+  tracked_pub_->publish(make_tracked(3, orb_slam3_msgs::msg::TrackedFrame::LOST,
+                                     false, 0.0, 1, 1, revision));
+  event_pub_->publish(make_event(8, orb_slam3_msgs::msg::TrackingEvent::RELOCALIZED,
+                                 corrected_revision));
+  tracked_pub_->publish(make_tracked(9, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 1.0, 1, 1, corrected_revision));
+  spinFlush(mapper_, helper_, 300ms);
+
+  ASSERT_TRUE(last_published_map_revision_);
+  const auto still_paired_old_map = mapForRevision(*last_published_map_revision_);
+  ASSERT_TRUE(still_paired_old_map.has_value());
+  EXPECT_EQ(still_paired_old_map->header.stamp,
+            last_published_map_revision_->header.stamp);
+  EXPECT_EQ(still_paired_old_map->data, old_data);
+  EXPECT_EQ(last_published_map_revision_->map_revision, old_map_revision);
+
+  graph_pub_->publish(make_graph(9, corrected_revision, 1, 1.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this, old_map_revision] {
+    return last_published_map_revision_ &&
+      last_published_map_revision_->map_revision > old_map_revision;
+  }, 12000ms));
+}
+
+TEST_F(MapperNodeTest, DestroyingNodeWithQueuedScansAndRebuildWorkIsSafe) {
+  const uint64_t revision = graph_rev_base_ + 1u;
+  mapper_node_test_hooks::armPublishBarrier();
+  publishPreparedSweep(revision);
+  spinFlush(mapper_, helper_, 200ms);
+  ASSERT_TRUE(mapper_node_test_hooks::waitForPublishBarrier(4000ms));
+
+  scan_pub_->publish(sweep(2'200'000'000LL, 0.05F, {2.0F, 2.0F, 2.0F}));
+  spinFlush(mapper_, helper_, 100ms);
+
+  std::atomic_bool destroy_completed{false};
+  auto node = std::move(mapper_);
+  std::thread destroyer([&destroy_completed, node = std::move(node)]() mutable {
+    node.reset();
+    destroy_completed.store(true);
+  });
+  ASSERT_TRUE(mapper_node_test_hooks::waitForDestructorEntry(1000ms));
+  EXPECT_FALSE(destroy_completed.load());
+
+  mapper_node_test_hooks::releasePublishBarrier();
+  destroyer.join();
+  EXPECT_TRUE(mapper_node_test_hooks::publishCompleted());
+  EXPECT_TRUE(destroy_completed.load());
 }
 
 // World-x of the rightmost occupied cell (cell index → world via origin/resolution).
@@ -535,10 +956,12 @@ TEST_F(MapperNodeTest, MapTopicsAreReliableTransientLocal) {
   ASSERT_EQ(map_i.size(), 1u);
   EXPECT_EQ(map_i[0].qos_profile().reliability(), rclcpp::ReliabilityPolicy::Reliable);
   EXPECT_EQ(map_i[0].qos_profile().durability(),  rclcpp::DurabilityPolicy::TransientLocal);
+  EXPECT_EQ(map_i[0].qos_profile().depth(), 10u);
 
   ASSERT_EQ(rev_i.size(), 1u);
   EXPECT_EQ(rev_i[0].qos_profile().reliability(), rclcpp::ReliabilityPolicy::Reliable);
   EXPECT_EQ(rev_i[0].qos_profile().durability(),  rclcpp::DurabilityPolicy::TransientLocal);
+  EXPECT_EQ(rev_i[0].qos_profile().depth(), 10u);
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +972,45 @@ TEST_F(MapperNodeTest, NoCanonicalMapTopicOrMapOdomTfPublished) {
       << "Node must not publish /map";
   EXPECT_TRUE(mapper_->get_publishers_info_by_topic("/tf").empty())
       << "Node must not publish /tf";
+}
+
+// ---------------------------------------------------------------------------
+// Nearest-anchor snap: a tracked frame whose wheel interpolation fails at
+// ingestion (e.g. live sim-time skew — wheel odometry has not arrived yet
+// when the tracked frame is processed) must still be anchored and eventually
+// produce a committed scan, instead of being silently dropped.
+// ---------------------------------------------------------------------------
+TEST_F(MapperNodeTest, TrackedFrameWithoutWheelDataAtIngestionStillProducesCommittedScan) {
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+
+  // No wheel odometry has been published yet — wheel_buf_ is empty, so
+  // interpolation at the tracked-frame stamp must fail. Under the old
+  // behavior this dropped the anchor entirely; the fix must anchor it anyway.
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, rev1));
+  spinFlush(mapper_, helper_, 200ms);
+
+  graph_pub_->publish(make_graph(2, rev1, 1));
+  spinFlush(mapper_, helper_, 300ms);
+
+  // Wheel odometry arrives afterward, covering the scan's own timestamp
+  // (needed by the unrelated, ray-level ScanDeskewer — not by the anchor).
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+
+  const std::size_t rev_count_before = map_rev_count_;
+  scan_pub_->publish(make_scan(2, 2.0f));
+
+  bool ok = spinUntil2(mapper_, helper_,
+    [this, rev_count_before] {
+      return map_rev_count_ > rev_count_before &&
+             last_map_revision_ &&
+             last_map_revision_->committed_scan_count >= 1u;
+    });
+
+  ASSERT_TRUE(ok) << "Nearest-anchor snap should still allow the scan to "
+                     "commit even though wheel odometry was unavailable when "
+                     "the tracked frame arrived";
 }
 
 // ---------------------------------------------------------------------------
@@ -569,9 +1031,39 @@ TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   EXPECT_NEAR(mapper_->get_parameter("wheel_retention_s").as_double(),  300.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       12.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       20.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("max_roll_pitch_deg").as_double(),   10.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("max_height_delta_m").as_double(),   0.15, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("max_scan_yaw_change_rad").as_double(), 0.005, 1e-12);
+  EXPECT_NEAR(mapper_->get_parameter("visual_anchor_max_gap_ms").as_double(), 200.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("pending_scan_timeout_s").as_double(), 2.0, 1e-9);
+  EXPECT_EQ(mapper_->get_parameter("pending_scan_limit").as_int(), 200);
+}
+
+TEST_F(MapperNodeTest, ScanGateParametersRejectInvalidBoundaries) {
+  const auto rejects = [](const rclcpp::Parameter& parameter) {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({parameter});
+    EXPECT_THROW((void)std::make_shared<MapperNode>(options), std::invalid_argument);
+  };
+
+  rejects(rclcpp::Parameter("max_scan_yaw_change_rad", -0.000001));
+  rejects(rclcpp::Parameter("visual_anchor_max_gap_ms", -0.000001));
+  rejects(rclcpp::Parameter("pending_scan_timeout_s", -0.000001));
+  rejects(rclcpp::Parameter("pending_scan_limit", 0));
+  rejects(rclcpp::Parameter("pending_scan_limit", -1));
+  rejects(rclcpp::Parameter("max_scan_yaw_change_rad",
+                            std::numeric_limits<double>::quiet_NaN()));
+  rejects(rclcpp::Parameter("max_scan_yaw_change_rad",
+                            std::numeric_limits<double>::infinity()));
+  rejects(rclcpp::Parameter("visual_anchor_max_gap_ms",
+                            std::numeric_limits<double>::quiet_NaN()));
+  rejects(rclcpp::Parameter("visual_anchor_max_gap_ms",
+                            std::numeric_limits<double>::infinity()));
+  rejects(rclcpp::Parameter("pending_scan_timeout_s",
+                            std::numeric_limits<double>::quiet_NaN()));
+  rejects(rclcpp::Parameter("pending_scan_timeout_s",
+                            std::numeric_limits<double>::infinity()));
 }
 
 }  // namespace

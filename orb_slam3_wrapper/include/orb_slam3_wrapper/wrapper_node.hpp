@@ -27,6 +27,8 @@
 #include <orb_slam3_msgs/msg/tracked_frame.hpp>
 #include <orb_slam3_msgs/msg/tracking_event.hpp>
 
+#include <opencv2/core/utility.hpp>
+
 #include "orb_slam3_wrapper/backend.hpp"
 #include "orb_slam3_wrapper/calibration.hpp"
 #include "orb_slam3_wrapper/pose_conversion.hpp"
@@ -66,6 +68,7 @@ private:
   std::string map_frame_;
   double sync_max_skew_ms_;
   double tracking_image_rate_hz_;
+  int opencv_num_threads_;
   std::string left_info_topic_;
   std::string right_info_topic_;
   std::optional<sensor_msgs::msg::CameraInfo> left_info_;

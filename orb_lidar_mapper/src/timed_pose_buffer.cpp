@@ -1,5 +1,7 @@
 #include "orb_lidar_mapper/timed_pose_buffer.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 
@@ -74,6 +76,52 @@ std::optional<Pose2> TimedPoseBuffer::relative(
     return std::nullopt;
   }
   return from->inverse() * *to;
+}
+
+std::optional<double> TimedPoseBuffer::maximumYawExcursion(
+  std::int64_t from_ns, std::int64_t to_ns) const {
+  if (to_ns < from_ns) {
+    return std::nullopt;
+  }
+  const auto from = interpolate(from_ns);
+  const auto to = interpolate(to_ns);
+  if (!from || !to) {
+    return std::nullopt;
+  }
+
+  double unwrapped_yaw = from->yaw;
+  double minimum_yaw = unwrapped_yaw;
+  double maximum_yaw = unwrapped_yaw;
+  double previous_wrapped_yaw = from->yaw;
+  std::int64_t previous_stamp_ns = from_ns;
+  const auto max_gap_ns = static_cast<std::uint64_t>(max_gap_ns_);
+
+  const auto accumulate = [&](double wrapped_yaw) {
+    unwrapped_yaw += Pose2::normalizeAngle(wrapped_yaw - previous_wrapped_yaw);
+    previous_wrapped_yaw = wrapped_yaw;
+    minimum_yaw = std::min(minimum_yaw, unwrapped_yaw);
+    maximum_yaw = std::max(maximum_yaw, unwrapped_yaw);
+  };
+
+  for (const TimedPose2& sample : samples_) {
+    if (sample.stamp_ns <= from_ns || sample.stamp_ns >= to_ns) {
+      continue;
+    }
+    if (orderedDuration(previous_stamp_ns, sample.stamp_ns) > max_gap_ns) {
+      return std::nullopt;
+    }
+    accumulate(sample.pose.yaw);
+    previous_stamp_ns = sample.stamp_ns;
+  }
+  if (orderedDuration(previous_stamp_ns, to_ns) > max_gap_ns) {
+    return std::nullopt;
+  }
+  accumulate(to->yaw);
+  return maximum_yaw - minimum_yaw;
+}
+
+std::optional<std::int64_t> TimedPoseBuffer::newestStamp() const noexcept {
+  return samples_.empty() ? std::nullopt : std::optional<std::int64_t>(samples_.back().stamp_ns);
 }
 
 std::size_t TimedPoseBuffer::size() const noexcept {

@@ -1,18 +1,17 @@
-"""Dashboard launch: static HTTP server + read-only foxglove_bridge.
+"""Dashboard launch: custom read-only dashboard_server (no foxglove).
 
-Serves the orb_slam_dashboard web app and a capability-restricted ROS
-WebSocket bridge bound to a configurable Tailscale/LAN host. Never
-imports foxglove_bridge Python modules (package may be absent at parse
-time); the Node only resolves at launch time.
+Starts a single ROS node that subscribes to the SLAM/mapper topics in-graph and
+serves a server-rendered map PNG + a JSON /state endpoint over plain HTTP to a
+minimal vanilla-JS frontend. An external ROS WebSocket bridge is intentionally
+not used: its mere presence in the DDS graph was measured to degrade ORB-SLAM3
+tracking ~5x, while a plain in-graph subscriber node does not. The wrapper and
+mapper are untouched.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -20,64 +19,25 @@ from launch_ros.actions import Node
 def _setup(context, *args, **kwargs):
     dashboard_host = LaunchConfiguration("dashboard_host").perform(context)
     http_port = LaunchConfiguration("http_port").perform(context)
-    websocket_port = LaunchConfiguration("websocket_port").perform(context)
-
-    try:
-        bringup_share = Path(get_package_share_directory("orb_slam_bringup"))
-    except Exception:  # pragma: no cover - source-tree fallback
-        bringup_share = Path(__file__).resolve().parents[1]
-
-    bridge_config = bringup_share / "config" / "read_only_bridge.yaml"
-    if not bridge_config.is_file():
-        bridge_config = (
-            Path(__file__).resolve().parents[1] / "config" / "read_only_bridge.yaml"
-        )
-
-    # Resolve the plain Python HTTP server executable. It is NOT a ROS node
-    # (argparse rejects --ros-args that Node would inject).
-    try:
-        dash_prefix = Path(get_package_prefix("orb_slam_dashboard"))
-        server_exe = (
-            dash_prefix / "lib" / "orb_slam_dashboard" / "orb_slam_dashboard_server"
-        )
-    except Exception:  # pragma: no cover
-        server_exe = Path("orb_slam_dashboard_server")
-
-    # URL host: if bound to 0.0.0.0, tell the operator to open localhost.
-    url_host = "127.0.0.1" if dashboard_host in ("0.0.0.0", "::", "") else dashboard_host
-    url = (
-        f"http://{url_host}:{http_port}/"
-        f"?ws=ws://{url_host}:{websocket_port}"
+    use_sim_time = LaunchConfiguration("use_sim_time").perform(context) in (
+        "true", "True", "1", "yes",
     )
+
+    url_host = "127.0.0.1" if dashboard_host in ("0.0.0.0", "::", "") else dashboard_host
+    url = f"http://{url_host}:{http_port}/"
 
     return [
         LogInfo(msg=f"[dashboard] open {url}"),
-        # Static HTTP server for the built dashboard (Task 3).
-        # ExecuteProcess (not Node) so launch does not append --ros-args.
-        ExecuteProcess(
-            cmd=[
-                str(server_exe),
-                "--host",
-                dashboard_host,
-                "--port",
-                http_port,
-            ],
-            name="orb_slam_dashboard_server",
-            output="screen",
-        ),
-        # Read-only foxglove_bridge: yaml locks capabilities/whitelists;
-        # address/port overridden from launch args so the bridge binds the
-        # configured Tailscale/LAN host (yaml defaults are 0.0.0.0:8765).
         Node(
-            package="foxglove_bridge",
-            executable="foxglove_bridge",
-            name="foxglove_bridge",
+            package="orb_slam_bringup",
+            executable="dashboard_server",
+            name="dashboard_server",
             parameters=[
-                str(bridge_config),
                 {
-                    "address": dashboard_host,
-                    "port": int(websocket_port),
-                },
+                    "use_sim_time": use_sim_time,
+                    "host": dashboard_host,
+                    "port": int(http_port),
+                }
             ],
             output="screen",
         ),
@@ -89,20 +49,18 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument(
                 "dashboard_host",
-                default_value="100.102.92.45",
-                description=(
-                    "Tailscale/LAN bind address for HTTP server and foxglove_bridge"
-                ),
+                default_value="0.0.0.0",
+                description="Bind address for the dashboard HTTP server",
             ),
             DeclareLaunchArgument(
                 "http_port",
                 default_value="51871",
-                description="Static dashboard HTTP port",
+                description="Dashboard HTTP port",
             ),
             DeclareLaunchArgument(
-                "websocket_port",
-                default_value="8765",
-                description="foxglove_bridge WebSocket port",
+                "use_sim_time",
+                default_value="false",
+                description="Use sim time (true during bag replay)",
             ),
             OpaqueFunction(function=_setup),
         ]

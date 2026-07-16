@@ -318,7 +318,7 @@ def _setup(context, *args, **kwargs):
         )
     )
 
-    # Dashboard (Task 4): HTTP + read-only foxglove_bridge when requested.
+    # Dashboard: custom read-only dashboard_server (no foxglove) when requested.
     if start_dashboard in ("true", "1", "yes"):
         dashboard_candidates = [
             bringup_share / "launch" / "dashboard.launch.py",
@@ -331,6 +331,7 @@ def _setup(context, *args, **kwargs):
                     dashboard_launch,
                     {
                         "dashboard_host": dashboard_host,
+                        "use_sim_time": "true",
                     },
                 )
             )

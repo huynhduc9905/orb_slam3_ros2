@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ORB Lidar Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="status-bar">
+    <span class="brand">ORB Lidar</span>
+    <span id="conn" class="badge badge-disconnected">connecting</span>
+    <span id="track" class="badge">--</span>
+    <span id="recovery" class="badge" hidden>RECOVERY</span>
+    <span class="meta">track <b id="trackHz">0.0</b> Hz</span>
+    <span class="meta">odom <b id="odomHz">0.0</b> Hz</span>
+    <span class="meta">kp <b id="kp">0</b></span>
+    <span class="spacer"></span>
+    <span id="revisions" class="meta">g<b id="graphRev">0</b> / m<b id="mapRev">0</b></span>
+    <span id="rebuild" class="meta"></span>
+  </header>
+
+  <main class="main">
+    <div class="map-region">
+      <canvas id="map"></canvas>
+      <div id="waiting" class="waiting">Waiting for committed map…</div>
+    </div>
+    <aside class="side">
+      <h2>Events</h2>
+      <ul id="events" class="events"></ul>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

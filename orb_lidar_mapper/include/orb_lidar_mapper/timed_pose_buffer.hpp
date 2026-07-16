@@ -21,6 +21,9 @@ class TimedPoseBuffer {
   bool push(TimedPose2 sample);
   std::optional<Pose2> interpolate(std::int64_t stamp_ns) const;
   std::optional<Pose2> relative(std::int64_t from_ns, std::int64_t to_ns) const;
+  std::optional<double> maximumYawExcursion(
+    std::int64_t from_ns, std::int64_t to_ns) const;
+  std::optional<std::int64_t> newestStamp() const noexcept;
   std::size_t size() const noexcept;
 
  private:

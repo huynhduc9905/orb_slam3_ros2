@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -34,9 +35,19 @@ namespace orb_lidar_mapper {
 class MapperNode final : public rclcpp::Node {
 public:
   explicit MapperNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions{});
-  ~MapperNode() override = default;
+  ~MapperNode() override;
 
 private:
+  struct PendingScan {
+    sensor_msgs::msg::LaserScan::ConstSharedPtr message;
+    Pose2 base_to_lidar;
+    std::int64_t start_ns{};
+    std::int64_t end_ns{};
+    bool tracking_lost{};
+  };
+
+  enum class PendingScanResult { kWaiting, kProcessed, kDropped };
+
   // ── Callbacks ─────────────────────────────────────────────────────────────
   void onOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg);
   void onTrackedFrame(orb_slam3_msgs::msg::TrackedFrame::ConstSharedPtr msg);
@@ -45,6 +56,8 @@ private:
   void onScan(sensor_msgs::msg::LaserScan::ConstSharedPtr msg);
 
   // ── Internal helpers ───────────────────────────────────────────────────────
+  void processPendingScansLocked();
+  PendingScanResult processPendingScanLocked(const PendingScan& pending);
   void publishCommittedScanMarker(const std::vector<Ray2>& rays, const Pose2& pose, int64_t stamp_ns);
   void publishProvisionalScanMarker(const std::vector<Ray2>& rays, const Pose2& pose, int64_t stamp_ns);
   void deleteProvisionalMarkers();
@@ -68,6 +81,10 @@ private:
   double usable_range_m_;
   double max_roll_pitch_deg_;
   double max_height_delta_m_;
+  double max_scan_yaw_change_rad_;
+  double visual_anchor_max_gap_ms_;
+  double pending_scan_timeout_s_;
+  std::int64_t pending_scan_limit_;
 
   // ── Core objects (all accessed only from subscription callbacks / mutex) ──
   std::mutex mutex_;
@@ -75,6 +92,7 @@ private:
   std::unique_ptr<TimedPoseBuffer> wheel_buf_;   // mirror for deskewing
   std::unique_ptr<MapRebuilder> rebuilder_;
   std::shared_ptr<ScanArchive> archive_;
+  std::deque<PendingScan> pending_scans_;
   std::unordered_set<uint64_t> committed_scan_ids_;  // scan_ids already fed to rebuilder
 
   // TF
@@ -95,6 +113,8 @@ private:
   std::atomic<uint64_t> scans_no_anchor_{0};
   std::atomic<uint64_t> scans_committed_{0};
   std::atomic<uint64_t> scans_provisional_{0};
+  std::atomic<uint64_t> scans_turn_rejected_{0};
+  std::atomic<uint64_t> scans_timeout_dropped_{0};
 
   // Wheel path accumulation (guarded by mutex_)
   std::vector<geometry_msgs::msg::PoseStamped> wheel_poses_;

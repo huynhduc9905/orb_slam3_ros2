@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "orb_lidar_mapper/timed_pose_buffer.hpp"
@@ -25,7 +26,11 @@ struct FrameAnchor {
   std::uint64_t reference_keyframe_id{};
   Pose2 map_pose;
   Pose2 reference_to_frame;
-  Pose2 wheel_pose;
+  // Interpolated wheel pose at this frame's timestamp — used only to bridge the
+  // visual anchor to a scan's exact sub-anchor timestamp. Absent at ingestion
+  // when wheel odometry has not arrived yet; addWheel() backfills it later.
+  std::optional<Pose2> wheel_pose;
+  std::uint64_t graph_revision{};
 };
 
 struct ScanPose {
@@ -55,13 +60,33 @@ struct GraphSnapshotValue {
   std::vector<KeyframeValue> keyframes;
 };
 
+struct VisualWheelBracket {
+  std::size_t start_frame_index{};
+  std::size_t end_frame_index{};
+  std::int64_t start_stamp_ns{};
+  std::int64_t end_stamp_ns{};
+  Pose2 start_map_pose;
+  Pose2 end_map_pose;
+  Pose2 start_wheel_pose;
+  Pose2 end_wheel_pose;
+};
+
 class TrajectoryStore {
  public:
   explicit TrajectoryStore(TrajectoryConfig config);
   ~TrajectoryStore();
   bool addWheel(TimedPose2 sample);
   void addTrackedFrame(FrameAnchor frame);
-  std::optional<ScanPose> placeScan(std::int64_t stamp_ns);
+  std::optional<ScanPose> placeScan(
+    std::int64_t stamp_ns, bool force_provisional = false);
+  std::optional<VisualWheelBracket> visualWheelBracket(
+    std::int64_t stamp_ns, std::int64_t scan_end_ns,
+    std::int64_t max_visual_anchor_gap_ns) const;
+  std::optional<ScanPose> placeBracketedScan(
+    std::int64_t stamp_ns, std::int64_t scan_end_ns,
+    std::int64_t max_visual_anchor_gap_ns);
+  bool isLossTimestamp(std::int64_t stamp_ns) const;
+  std::optional<std::int64_t> latestFrameStamp() const noexcept;
   bool applyGraphSnapshot(const GraphSnapshotValue& snapshot);
   std::shared_ptr<const TrajectoryRevision> snapshot() const;
   std::size_t unresolvedScanCount() const;
@@ -79,6 +104,13 @@ class TrajectoryStore {
   void recomputeAll();
   void recomputeScan(StoredScan& scan);
   std::optional<std::size_t> latestValidFrameAt(std::int64_t stamp_ns) const;
+  std::optional<std::size_t> lossIntervalAt(std::int64_t stamp_ns) const;
+  std::optional<std::pair<std::size_t, std::size_t>> bracketingValidFrames(
+    std::int64_t stamp_ns, std::int64_t scan_end_ns,
+    std::int64_t max_visual_anchor_gap_ns) const;
+  std::optional<Pose2> bracketedPose(
+    std::size_t start_frame, std::size_t end_frame,
+    const Pose2& wheel_pose, double alpha) const;
   std::optional<Pose2> poseFromFrame(std::size_t frame_index, std::int64_t stamp_ns) const;
   std::optional<double> wheelCumulativeDistance(
     std::int64_t stamp_ns, const Pose2& pose) const;

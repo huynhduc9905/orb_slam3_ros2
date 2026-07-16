@@ -61,55 +61,23 @@ def test_profile_documents_right_camera_info_wrong_frame_id():
     assert profile["camera"]["right_camera_info_frame_is_wrong"] is True
 
 
-BRIDGE_CONFIG_PATH = (
-    Path(__file__).resolve().parents[1] / "config" / "read_only_bridge.yaml"
+DASHBOARD_LAUNCH_PATH = (
+    Path(__file__).resolve().parents[1] / "launch" / "dashboard.launch.py"
+)
+BAG_REPLAY_LAUNCH_PATH = (
+    Path(__file__).resolve().parents[1] / "launch" / "bag_replay.launch.py"
 )
 
-# Exactly the three anchored topic regexes allowed on the read-only bridge.
-APPROVED_TOPIC_WHITELIST = [
-    r"^/orb_lidar/(map|map_revision|corrected_path_revisioned|wheel_path|provisional_scan)$",
-    r"^/orb_slam3/(tracked_frame|events|keyframes|loop_edges|tracking_image/compressed)$",
-    r"^/diagnostics$",
-]
+
+def test_dashboard_launch_uses_direct_read_only_server_without_foxglove():
+    text = DASHBOARD_LAUNCH_PATH.read_text(encoding="utf-8")
+    assert 'executable="dashboard_server"' in text
+    assert "foxglove_bridge" not in text
+    assert "read_only_bridge.yaml" not in text
+    assert "websocket_port" not in text
 
 
-def load_bridge_config() -> dict:
-    with BRIDGE_CONFIG_PATH.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def test_read_only_bridge_locks_down_capabilities():
-    """foxglove_bridge must be read-only: no real caps/write-whitelists, approved topics only.
-
-    Empty lockdown lists must be typed as string arrays (e.g. [""]) so rclcpp can
-    load them; bare [] crashes foxglove_bridge. Security property: no non-empty
-    entry (so capabilities: ["clientPublish"] fails this test).
-    """
-    cfg = load_bridge_config()
-    params = cfg["foxglove_bridge"]["ros__parameters"]
-
-    for key in (
-        "capabilities",
-        "service_whitelist",
-        "param_whitelist",
-        "client_topic_whitelist",
-    ):
-        values = params[key]
-        assert isinstance(values, list), f"{key} must be a list"
-        # Security: no real capability / write-whitelist name (would FAIL on
-        # e.g. capabilities: ["clientPublish"]).
-        assert [c for c in values if c] == [], (
-            f"{key} must contain no non-empty entries (read-only); got {values!r}"
-        )
-        # Typing: bare [] crashes foxglove_bridge (rclcpp cannot infer type);
-        # require the verified empty string-array form.
-        assert values == [""], (
-            f"{key} must be [\"\"] so rclcpp types it as string[]; got {values!r}"
-        )
-
-    topic_whitelist = params["topic_whitelist"]
-    assert topic_whitelist == APPROVED_TOPIC_WHITELIST
-    assert len(topic_whitelist) == 3
-    for pattern in topic_whitelist:
-        assert pattern.startswith("^"), f"topic regex must be anchored: {pattern}"
-        assert pattern.endswith("$"), f"topic regex must be anchored: {pattern}"
+def test_bag_replay_forwards_sim_time_to_direct_dashboard():
+    text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
+    assert '"use_sim_time": "true"' in text
+    assert "foxglove_bridge" not in text

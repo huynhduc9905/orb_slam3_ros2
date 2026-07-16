@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,10 +13,18 @@
 
 namespace orb_lidar_mapper {
 
+struct ArchivedBracketedMotion {
+  std::size_t start_frame_index{};
+  std::size_t end_frame_index{};
+  Pose2 base_to_lidar;
+  std::vector<RayMotion2> rays;
+};
+
 struct ArchivedScan {
   std::uint64_t scan_id{};
   std::int64_t stamp_ns{};
   std::vector<Ray2> rays;
+  std::optional<ArchivedBracketedMotion> bracketed_motion;
 };
 
 struct ScanArchive {

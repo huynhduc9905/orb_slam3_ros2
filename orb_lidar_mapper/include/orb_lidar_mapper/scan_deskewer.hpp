@@ -33,12 +33,36 @@ struct Ray2 {
   bool has_hit{};
 };
 
+struct ScanMotionBracket {
+  std::int64_t start_stamp_ns{};
+  std::int64_t end_stamp_ns{};
+  Pose2 start_map_pose;
+  Pose2 end_map_pose;
+  Pose2 start_wheel_pose;
+  Pose2 end_wheel_pose;
+};
+
+struct RayMotion2 {
+  Pose2 wheel_pose;
+  double alpha{};
+  Point2 lidar_end;
+  bool has_hit{};
+};
+
+struct BracketedDeskewResult {
+  std::vector<Ray2> rays;
+  std::vector<RayMotion2> ray_motions;
+};
+
 class ScanDeskewer {
  public:
   static std::optional<std::vector<Ray2>> deskew(const ScanValue& scan,
                                                    const Pose2& committed_scan_base_pose,
                                                    const Pose2& base_to_lidar,
                                                    const TimedPoseBuffer& wheels);
+  static std::optional<BracketedDeskewResult> deskewBracketed(
+    const ScanValue& scan, const Pose2& base_to_lidar,
+    const TimedPoseBuffer& wheels, const ScanMotionBracket& bracket);
 };
 
 }  // namespace orb_lidar_mapper

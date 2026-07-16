@@ -110,5 +110,24 @@ TEST(TimedPoseBuffer, RelativeReturnsTransformFromFirstTimeToSecond) {
   EXPECT_TRUE(result->isApprox(Pose2{2.0, 0.0, 0.0}, 1e-12));
 }
 
+TEST(TimedPoseBuffer, MeasuresPeakToPeakYawIncludingTurnThenReturn) {
+  TimedPoseBuffer buffer(10'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(buffer.push({0, Pose2{0, 0, 0.0}}));
+  ASSERT_TRUE(buffer.push({50'000'000, Pose2{0.05, 0, 0.01}}));
+  ASSERT_TRUE(buffer.push({100'000'000, Pose2{0.10, 0, 0.0}}));
+  const auto excursion = buffer.maximumYawExcursion(0, 100'000'000);
+  ASSERT_TRUE(excursion);
+  EXPECT_NEAR(*excursion, 0.01, 1e-12);
+}
+
+TEST(TimedPoseBuffer, UnwrapsYawAcrossPiForExcursion) {
+  TimedPoseBuffer buffer(10'000'000'000LL, 100'000'000LL);
+  ASSERT_TRUE(buffer.push({0, Pose2{0, 0, M_PI - 0.004}}));
+  ASSERT_TRUE(buffer.push({100'000'000, Pose2{0, 0, -M_PI + 0.004}}));
+  const auto excursion = buffer.maximumYawExcursion(0, 100'000'000);
+  ASSERT_TRUE(excursion);
+  EXPECT_NEAR(*excursion, 0.008, 1e-12);
+}
+
 }  // namespace
 }  // namespace orb_lidar_mapper

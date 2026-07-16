@@ -63,8 +63,17 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
   map_frame_(declare_parameter("map_frame", "orb_map")),
   sync_max_skew_ms_(declare_parameter("sync_max_skew_ms", 5.0)),
   tracking_image_rate_hz_(declare_parameter("tracking_image_rate_hz", 5.0)),
+  opencv_num_threads_(declare_parameter("opencv_num_threads", 4)),
   left_info_topic_(declare_parameter("left_info_topic", "/camera/camera/infra1/camera_info")),
   right_info_topic_(declare_parameter("right_info_topic", "/camera/camera/infra2/camera_info")) {
+  // OpenCV/TBB defaults to hardware_concurrency() worker threads for every
+  // parallel_for_ dispatch (stereo rectification, per-octave ORB feature
+  // extraction) — on a shared machine that means a fresh 16-wide thread-pool
+  // fan-out on every single stereo frame, competing with every other node's
+  // callbacks for the same cores and adding thread wake/join overhead that
+  // can dominate the actual per-frame work. Cap it to a small, configurable
+  // pool so this node leaves headroom for the rest of the stack.
+  cv::setNumThreads(opencv_num_threads_);
   const auto left_topic = declare_parameter("left_image_topic", "/camera/camera/infra1/image_rect_raw");
   const auto right_topic = declare_parameter("right_image_topic", "/camera/camera/infra2/image_rect_raw");
   std::string settings_default;
