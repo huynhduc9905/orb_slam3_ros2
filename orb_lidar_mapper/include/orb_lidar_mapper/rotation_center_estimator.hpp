@@ -15,7 +15,8 @@ struct ScanPair {
   std::size_t source_index{};
   std::size_t target_index{};
   std::size_t yaw_sector{};
-  double odom_yaw_delta_rad{};
+  // Expected yaw of the source-to-target lidar-frame transform.
+  double expected_source_to_target_yaw_rad{};
 };
 
 struct CenterSample {

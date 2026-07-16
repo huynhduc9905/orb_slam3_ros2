@@ -111,7 +111,7 @@ std::vector<CenterSample> estimateSamples(
       continue;
     }
     ScanPair pair{source->second, target->second, scheduled.yaw_sector,
-                  scheduled.odom_yaw_delta_rad};
+                  scheduled.expected_source_to_target_yaw_rad};
     sample = estimateRotationCenter(
       method, pair, scans[source->second], scans[target->second], icp,
       max_center_x, max_abs_center_y);

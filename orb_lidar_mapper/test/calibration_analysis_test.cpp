@@ -10,6 +10,13 @@
 namespace orb_lidar_mapper {
 namespace {
 
+Point2 applyPose(const Pose2& pose, Point2 point) {
+  const double c = std::cos(pose.yaw);
+  const double s = std::sin(pose.yaw);
+  return {pose.x + c * point.x - s * point.y,
+          pose.y + s * point.x + c * point.y};
+}
+
 CenterSample acceptedCenter(double x, double y, std::size_t sector) {
   CenterSample sample;
   sample.method = DeskewMethod::kOdom;
@@ -127,6 +134,66 @@ TEST(CalibrationAnalysis, SharpnessUsesExactGridsAndFindsUniqueMinimum) {
   EXPECT_FALSE(result.refined.empty());
   EXPECT_TRUE(result.reliable) << result.rejection_reason;
   EXPECT_NEAR(result.best_offset_m, kTrueOffset, 0.0003);
+}
+
+TEST(CalibrationAnalysis, SharpnessPairsAreTemporalNonAdjacentBoundedAndDeterministic) {
+  std::vector<DeskewedScan> scans;
+  TimedPoseBuffer odom(100'000'000'000LL, 100'000'000'000LL);
+  for (std::size_t i = 0; i < 80; ++i) {
+    const auto stamp = static_cast<std::int64_t>(i) * 100'000'000LL;
+    ASSERT_TRUE(odom.push({stamp, {0.0, 0.0, 2.0 * kPi * i / 80.0}}));
+    scans.push_back({1000 + i * 2, stamp, DeskewMethod::kOdom,
+                     {{-1.0, -0.5}, {0.0, 1.0}, {1.5, -0.2}, {2.0, 0.8}}});
+  }
+  const auto first = selectSharpnessPairs(scans, odom, 128);
+  const auto second = selectSharpnessPairs(scans, odom, 128);
+  ASSERT_EQ(first.size(), second.size());
+  for (std::size_t i = 0; i < first.size(); ++i) {
+    EXPECT_EQ(first[i].source_index, second[i].source_index);
+    EXPECT_EQ(first[i].target_index, second[i].target_index);
+  }
+  ASSERT_LE(first.size(), 128U);
+  ASSERT_FALSE(first.empty());
+  for (const auto& pair : first) {
+    EXPECT_GE(pair.target_index, pair.source_index + 2U);
+    EXPECT_GT(scans[pair.target_index].scan_id, scans[pair.source_index].scan_id + 1U);
+  }
+}
+
+TEST(CalibrationAnalysis, SharpnessUnevenPointCountsDoNotDominatePairAverage) {
+  constexpr double kTrueOffset = 0.261;
+  RotationDataset dataset;
+  std::vector<DeskewedScan> scans;
+  TimedPoseBuffer odom(100'000'000'000LL, 100'000'000'000LL);
+  const std::vector<Point2> world_points{
+      {-2.4, -1.1}, {-1.7, 0.2}, {-1.2, 2.3}, {-0.4, -2.0},
+      {0.1, 0.7}, {0.8, -1.4}, {1.3, 2.1}, {2.0, -0.3},
+      {2.7, 1.4}, {3.2, -1.8}, {-2.8, 1.6}, {1.9, 0.9},
+  };
+  for (std::size_t i = 0; i < 16; ++i) {
+    const auto stamp = static_cast<std::int64_t>(i) * 100'000'000LL;
+    const Pose2 base_pose{0.0, 0.0, 2.0 * kPi * i / 16.0};
+    ASSERT_TRUE(odom.push({stamp, base_pose}));
+    const Pose2 world_to_lidar = (base_pose * Pose2{kTrueOffset, 0.0, kPi}).inverse();
+    DeskewedScan scan{i, stamp, DeskewMethod::kOdom, {}};
+    for (const auto point : world_points) scan.points.push_back(applyPose(world_to_lidar, point));
+    scans.push_back(std::move(scan));
+  }
+  const auto baseline = evaluateMapSharpness(dataset, scans, odom, kTrueOffset);
+  auto uneven = scans;
+  uneven[0].points.insert(uneven[0].points.end(), 10'000, uneven[0].points.front());
+  const auto result = evaluateMapSharpness(dataset, uneven, odom, kTrueOffset);
+  EXPECT_TRUE(baseline.reliable) << baseline.rejection_reason;
+  EXPECT_TRUE(result.reliable) << result.rejection_reason;
+  EXPECT_NEAR(result.best_offset_m, kTrueOffset, 0.0003);
+  EXPECT_NEAR(result.best_offset_m, baseline.best_offset_m, 0.0003);
+}
+
+TEST(CalibrationAnalysis, SharpnessFlatAndMultimodalMinimaAreRejectedDeterministically) {
+  EXPECT_FALSE(sharpnessMinimumIsUnique({{0.20, 1.0}, {0.22, 1.0}, {0.24, 1.0}}));
+  EXPECT_FALSE(sharpnessMinimumIsUnique({{0.20, 2.0}, {0.22, 1.0}, {0.24, 2.0},
+                                         {0.26, 1.0}, {0.28, 2.0}}));
+  EXPECT_TRUE(sharpnessMinimumIsUnique({{0.20, 2.0}, {0.22, 1.0}, {0.24, 2.0}}));
 }
 
 TEST(CalibrationAnalysis, ClassifiesConsistentOffsetErrorAndDisagreement) {

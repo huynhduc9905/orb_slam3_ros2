@@ -37,6 +37,11 @@ struct SharpnessPoint {
   double score{};
 };
 
+struct SharpnessPair {
+  std::size_t source_index{};
+  std::size_t target_index{};
+};
+
 struct SharpnessResult {
   bool reliable{};
   double best_offset_m{};
@@ -57,8 +62,14 @@ MethodEstimate robustMethodEstimate(
   std::uint64_t seed = 0x4f52424c49444152ULL);
 
 SharpnessResult evaluateMapSharpness(
-  const RotationDataset&, const std::vector<DeskewedScan>&,
-  const TimedPoseBuffer&, double consensus_hint);
+    const RotationDataset&, const std::vector<DeskewedScan>&,
+    const TimedPoseBuffer&, double consensus_hint);
+
+std::vector<SharpnessPair> selectSharpnessPairs(
+    const std::vector<DeskewedScan>&, const TimedPoseBuffer&,
+    std::size_t maximum_pairs = 128);
+
+bool sharpnessMinimumIsUnique(const std::vector<SharpnessPoint>&);
 
 AggregateResult classifyCalibration(
   const std::vector<MethodEstimate>&, const SharpnessResult&,

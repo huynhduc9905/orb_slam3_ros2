@@ -57,7 +57,9 @@ std::vector<ScanPair> selectCalibrationPairs(
       const double delta = Pose2::normalizeAngle(target_pose->yaw - source_pose->yaw);
       const double absolute_delta = std::abs(delta);
       if (absolute_delta < min_yaw || absolute_delta > max_yaw) continue;
-      pairs.push_back({source, target, sectorForYaw(source_pose->yaw), delta});
+      // A source-to-target point transform uses T_target^-1 T_source, so its
+      // yaw is source minus target, the negative of the base-pose delta.
+      pairs.push_back({source, target, sectorForYaw(source_pose->yaw), -delta});
     }
   }
   return pairs;
@@ -72,7 +74,8 @@ CenterSample estimateRotationCenter(
   sample.source_scan_id = source.scan_id;
   sample.target_scan_id = target.scan_id;
   sample.yaw_sector = pair.yaw_sector;
-  sample.icp = icp.align(source.points, target.points, pair.odom_yaw_delta_rad);
+  sample.icp = icp.align(
+      source.points, target.points, pair.expected_source_to_target_yaw_rad);
   if (!sample.icp.converged) {
     sample.rejection_reason = sample.icp.rejection_reason;
     return sample;

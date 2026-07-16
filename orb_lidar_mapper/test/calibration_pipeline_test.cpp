@@ -21,11 +21,6 @@ Point2 applyPose(const Pose2& pose, Point2 point) {
           pose.y + s * point.x + c * point.y};
 }
 
-Pose2 rotationAbout(double yaw, Point2 center) {
-  return {center.x - std::cos(yaw) * center.x + std::sin(yaw) * center.y,
-          center.y - std::sin(yaw) * center.x - std::cos(yaw) * center.y, yaw};
-}
-
 std::vector<Point2> syntheticRoom() {
   return {{-2.0, -1.0}, {-1.2, -1.0}, {-0.4, -1.0}, {0.7, -1.0}, {1.8, -1.0},
           {2.3, -0.3}, {2.3, 0.4}, {1.7, 1.4}, {0.2, 1.7}, {-0.8, 1.3},
@@ -81,11 +76,14 @@ CalibrationPreparedDataset preparedSyntheticCalibrationDataset() {
   std::vector<DeskewedScan> odom;
   std::vector<DeskewedScan> existing;
   std::vector<DeskewedScan> imu;
+  constexpr double true_offset = 0.245;
   for (std::uint64_t id = 0; id <= 50; ++id) {
     const auto stamp = static_cast<std::int64_t>(id) * 500'000'000LL;
-    const auto motion = rotationAbout(-0.2 * static_cast<double>(id), {0.245, 0.0});
+    const Pose2 base_pose{0.0, 0.0, -0.2 * static_cast<double>(id)};
+    const Pose2 lidar_pose = base_pose * Pose2{true_offset, 0.0, kPi};
+    const Pose2 world_to_lidar = lidar_pose.inverse();
     std::vector<Point2> points;
-    for (const auto point : room) points.push_back(applyPose(motion, point));
+    for (const auto point : room) points.push_back(applyPose(world_to_lidar, point));
     odom.push_back({id, stamp, DeskewMethod::kOdom, points});
     existing.push_back({id, stamp, DeskewMethod::kExistingScan, points});
     imu.push_back({id, stamp, DeskewMethod::kImu, points});
@@ -94,7 +92,7 @@ CalibrationPreparedDataset preparedSyntheticCalibrationDataset() {
   prepared.existing_scans = existing;
   prepared.imu_scans_by_iteration = {imu, imu};
   for (const auto& pose : prepared.dataset.odom_poses) {
-    prepared.sharpness_odom_poses.push_back({pose.stamp_ns, {pose.pose.x, pose.pose.y, -pose.pose.yaw}});
+    prepared.sharpness_odom_poses.push_back(pose);
   }
   return prepared;
 }
@@ -170,7 +168,6 @@ TEST(CalibrationPipeline, RunsAllMethodsAndIteratesImuOffset) {
   config.bag_path = "/synthetic/fixture.mcap";
   config.output_dir = std::filesystem::temp_directory_path() / "task5-synthetic-pipeline";
   config.icp.max_correspondence_m = 2.0;
-  config.icp.maximum_yaw_error_rad = kPi;
   const auto run = runCalibrationDataset(config, preparedSyntheticCalibrationDataset());
   ASSERT_EQ(run.methods.size(), 3U);
   for (const auto& method : run.methods) {

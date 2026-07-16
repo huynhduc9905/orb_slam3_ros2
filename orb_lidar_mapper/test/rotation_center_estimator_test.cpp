@@ -26,6 +26,19 @@ DeskewedScan scan(std::uint64_t id, std::int64_t stamp) {
            {0.2, 1.7}, {-1.7, 1.1}, {-0.4, 0.15}, {1.1, -0.2}}};
 }
 
+DeskewedScan physicalScan(std::uint64_t id, std::int64_t stamp, double base_yaw) {
+  const Pose2 lidar_pose = Pose2{0.0, 0.0, base_yaw} * Pose2{0.26, 0.0, kPi};
+  const std::vector<Point2> world{
+      {-2.0, -1.0}, {-1.3, 0.4}, {-0.5, -1.4}, {0.3, 1.8},
+      {1.4, -0.7}, {2.0, 1.1}, {-1.8, 1.5}, {0.9, 0.2},
+  };
+  const Pose2 world_to_lidar = lidar_pose.inverse();
+  std::vector<Point2> points;
+  points.reserve(world.size());
+  for (const auto point : world) points.push_back(apply(world_to_lidar, point));
+  return {id, stamp, DeskewMethod::kOdom, points};
+}
+
 TEST(RotationCenter, LocksSourceToTargetSign) {
   const Pose2 motion = about(0.40, {0.26, 0.0});
   const auto center = centerFromTransform(motion);
@@ -53,8 +66,8 @@ TEST(RotationCenter, SelectsStablePairsAcrossYawSectors) {
                                             30.0 * kPi / 180.0);
   ASSERT_FALSE(pairs.empty());
   for (const auto& pair : pairs) {
-    EXPECT_GE(std::abs(pair.odom_yaw_delta_rad), 10.0 * kPi / 180.0);
-    EXPECT_LE(std::abs(pair.odom_yaw_delta_rad), 30.0 * kPi / 180.0);
+    EXPECT_GE(std::abs(pair.expected_source_to_target_yaw_rad), 10.0 * kPi / 180.0);
+    EXPECT_LE(std::abs(pair.expected_source_to_target_yaw_rad), 30.0 * kPi / 180.0);
     EXPECT_LT(pair.source_index, pair.target_index);
     EXPECT_LT(pair.yaw_sector, 8U);
   }
@@ -116,6 +129,27 @@ TEST(RotationCenter, RecordsAcceptedAndRejectedRawCenterSamples) {
   EXPECT_FALSE(rejected.accepted);
   EXPECT_EQ(rejected.rejection_reason, "yaw_disagreement");
   EXPECT_EQ(rejected.icp.rejection_reason, "yaw_disagreement");
+}
+
+TEST(RotationCenter, PhysicalSourceToTargetYawAndCenterUseOdomDeltaSign) {
+  for (const double target_yaw : {0.35, -0.35}) {
+    std::vector<DeskewedScan> scans{
+        physicalScan(10, 0, 0.0), physicalScan(11, 1'000'000'000LL, target_yaw)};
+    TimedPoseBuffer odom(10'000'000'000LL, 10'000'000'000LL);
+    ASSERT_TRUE(odom.push({0, Pose2{0.0, 0.0, 0.0}}));
+    ASSERT_TRUE(odom.push({1'000'000'000LL, Pose2{0.0, 0.0, target_yaw}}));
+    const auto pairs = selectCalibrationPairs(
+        scans, odom, {{0, 1'000'000'000LL}}, 0.30, 0.40);
+    ASSERT_EQ(pairs.size(), 1U);
+    EXPECT_NEAR(pairs.front().expected_source_to_target_yaw_rad, -target_yaw, 1e-12);
+    const auto sample = estimateRotationCenter(
+        DeskewMethod::kOdom, pairs.front(), scans[0], scans[1],
+        PlanarIcp(IcpConfig{}), 1.0, 0.25);
+    ASSERT_TRUE(sample.accepted) << sample.rejection_reason;
+    EXPECT_NEAR(sample.icp.source_to_target.yaw, -target_yaw, 0.01);
+    EXPECT_NEAR(sample.center.x, 0.26, 0.005);
+    EXPECT_NEAR(sample.center.y, 0.0, 0.005);
+  }
 }
 
 }  // namespace
