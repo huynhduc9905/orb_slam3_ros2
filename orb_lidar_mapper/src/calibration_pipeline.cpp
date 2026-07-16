@@ -132,6 +132,15 @@ MethodEstimate estimateMethod(const std::vector<CenterSample>& samples,
   return robustMethodEstimate(method, samples);
 }
 
+void validateCalibrationConfig(const CalibrationConfig& config) {
+  if (config.bag_path.empty() || config.output_dir.empty() ||
+      !std::isfinite(config.range_cap_m) || config.range_cap_m < 0.0 ||
+      !std::isfinite(config.min_abs_omega) || !std::isfinite(config.max_abs_omega) ||
+      !std::isfinite(config.max_abs_linear_speed)) {
+    throw std::invalid_argument("invalid calibration configuration");
+  }
+}
+
 }  // namespace
 
 std::vector<ScanPair> selectCommonCalibrationSchedule(
@@ -176,23 +185,31 @@ double preliminarySharpnessHint(
   return reliable_offsets[middle];
 }
 
-CalibrationRun runCalibration(const CalibrationConfig& config) {
-  if (config.bag_path.empty() || config.output_dir.empty() ||
-      !std::isfinite(config.range_cap_m) || config.range_cap_m < 0.0 ||
-      !std::isfinite(config.min_abs_omega) || !std::isfinite(config.max_abs_omega) ||
-      !std::isfinite(config.max_abs_linear_speed)) {
-    throw std::invalid_argument("invalid calibration configuration");
+MethodEstimate finalizeNonConvergedImuEstimate(std::vector<CenterSample>& samples) {
+  for (auto& sample : samples) {
+    if (sample.method == DeskewMethod::kImu && sample.accepted) {
+      sample.accepted = false;
+      sample.rejection_reason = "imu_offset_not_converged";
+    }
   }
+  auto estimate = estimateMethod(samples, DeskewMethod::kImu);
+  estimate.reliable = false;
+  return estimate;
+}
+
+CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
+                                     CalibrationPreparedDataset prepared) {
+  validateCalibrationConfig(config);
   CalibrationRun run;
   run.config = config;
-  run.dataset = RotationBagReader::read(config.bag_path);
+  run.dataset = std::move(prepared.dataset);
   const auto odom = makePoseBuffer(run.dataset);
   const auto intervals = selectStableRotationIntervals(
     run.dataset, config.min_abs_omega, config.max_abs_omega,
     config.max_abs_linear_speed, kMinimumStableIntervalNs);
   if (intervals.empty()) throw std::runtime_error("no stable rotation interval");
 
-  const auto odom_scans = deskewOdom(run.dataset, odom, config.range_cap_m);
+  const auto odom_scans = std::move(prepared.odom_scans);
   if (odom_scans.size() < 3) throw std::runtime_error("no usable odometry-deskewed scans");
   const auto schedule = selectCommonCalibrationSchedule(odom_scans, odom, intervals);
   if (schedule.empty()) throw std::runtime_error("no calibration scan pairs");
@@ -201,7 +218,7 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
 
   const auto odom_samples = estimateSamples(
     DeskewMethod::kOdom, odom_scans, schedule, base_ids, icp, 1.0, 0.25);
-  const auto existing_scans = deskewExisting(run.dataset, config.range_cap_m);
+  const auto existing_scans = std::move(prepared.existing_scans);
   const auto existing_samples = estimateSamples(
     DeskewMethod::kExistingScan, existing_scans, schedule, base_ids, icp, 1.0, 0.25);
 
@@ -210,7 +227,14 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
   MethodEstimate imu_estimate;
   bool imu_converged = false;
   for (std::size_t iteration = 0; iteration < kMaximumImuIterations; ++iteration) {
-    const auto imu_scans = deskewImu(run.dataset, imu_offset, config.range_cap_m);
+    ++run.imu_iterations;
+    std::vector<DeskewedScan> imu_scans;
+    if (prepared.imu_scans_by_iteration.empty()) {
+      imu_scans = deskewImu(run.dataset, imu_offset, config.range_cap_m);
+    } else {
+      imu_scans = prepared.imu_scans_by_iteration[
+        std::min(iteration, prepared.imu_scans_by_iteration.size() - 1)];
+    }
     imu_samples = estimateSamples(
       DeskewMethod::kImu, imu_scans, schedule, base_ids, icp, 1.0, 0.25);
     imu_estimate = estimateMethod(imu_samples, DeskewMethod::kImu);
@@ -224,14 +248,7 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
     imu_offset = updated;
   }
   if (!imu_converged) {
-    imu_estimate.reliable = false;
-    imu_estimate.rejection_counts["imu_offset_not_converged"]++;
-    for (auto& sample : imu_samples) {
-      if (sample.accepted) {
-        sample.accepted = false;
-        sample.rejection_reason = "imu_offset_not_converged";
-      }
-    }
+    imu_estimate = finalizeNonConvergedImuEstimate(imu_samples);
   }
 
   const auto existing_estimate = estimateMethod(existing_samples, DeskewMethod::kExistingScan);
@@ -241,12 +258,37 @@ CalibrationRun runCalibration(const CalibrationConfig& config) {
   run.center_samples.insert(run.center_samples.end(), odom_samples.begin(), odom_samples.end());
   run.center_samples.insert(run.center_samples.end(), imu_samples.begin(), imu_samples.end());
   run.center_samples.insert(run.center_samples.end(), existing_samples.begin(), existing_samples.end());
+  TimedPoseBuffer sharpness_odom = odom;
+  if (!prepared.sharpness_odom_poses.empty()) {
+    const auto retention = prepared.sharpness_odom_poses.back().stamp_ns -
+      prepared.sharpness_odom_poses.front().stamp_ns + kPoseMaximumGapNs;
+    sharpness_odom = TimedPoseBuffer(std::max<std::int64_t>(retention, kPoseMaximumGapNs),
+                                     kPoseMaximumGapNs);
+    for (const auto& pose : prepared.sharpness_odom_poses) sharpness_odom.push(pose);
+  }
   run.sharpness = evaluateMapSharpness(
-    run.dataset, odom_scans, odom, preliminarySharpnessHint(run.methods));
+    run.dataset, odom_scans, sharpness_odom, preliminarySharpnessHint(run.methods));
   run.aggregate = classifyCalibration(
     {run.methods[0], run.methods[1], run.methods[2]}, run.sharpness,
     run.dataset.recorded_mount.x_m);
   return run;
+}
+
+CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
+                                     RotationDataset dataset) {
+  validateCalibrationConfig(config);
+  CalibrationPreparedDataset prepared;
+  prepared.dataset = std::move(dataset);
+  const auto odom = makePoseBuffer(prepared.dataset);
+  prepared.odom_scans = deskewOdom(prepared.dataset, odom, config.range_cap_m);
+  prepared.existing_scans = deskewExisting(prepared.dataset, config.range_cap_m);
+  return runCalibrationDataset(config, std::move(prepared));
+}
+
+CalibrationRun runCalibration(const CalibrationConfig& config) {
+  validateCalibrationConfig(config);
+  auto dataset = RotationBagReader::read(config.bag_path);
+  return runCalibrationDataset(config, std::move(dataset));
 }
 
 int resultExitCode(ResultClass result) {

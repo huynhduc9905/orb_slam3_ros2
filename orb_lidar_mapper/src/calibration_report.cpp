@@ -2,14 +2,19 @@
 
 #include <chrono>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 namespace orb_lidar_mapper {
 namespace {
@@ -49,15 +54,27 @@ const char* resultName(ResultClass result) {
 }
 
 std::string number(double value) {
+  if (!std::isfinite(value)) return "null";
   std::ostringstream stream;
   stream << std::setprecision(17) << value;
   return stream.str();
 }
 
 std::string csvNumber(double value) {
+  if (!std::isfinite(value)) return "";
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(6) << value;
   return stream.str();
+}
+
+std::string csvField(const std::string& value) {
+  std::string escaped = "\"";
+  for (const char character : value) {
+    if (character == '"') escaped += "\"\"";
+    else escaped += character;
+  }
+  escaped += '"';
+  return escaped;
 }
 
 std::vector<Point2> mapPoints(const RotationDataset& dataset, double offset_m) {
@@ -182,12 +199,12 @@ std::string centersCsv(const CalibrationRun& run) {
   std::ostringstream csv;
   csv << "method,source_scan_id,target_scan_id,yaw_sector,accepted,center_x_m,center_y_m,forward_offset_m,delta_from_recorded_m,trimmed_rmse_m,overlap_ratio,rejection_reason\n";
   for (const auto& sample : run.center_samples) {
-    csv << methodName(sample.method) << ',' << sample.source_scan_id << ',' << sample.target_scan_id << ','
+    csv << csvField(methodName(sample.method)) << ',' << sample.source_scan_id << ',' << sample.target_scan_id << ','
         << sample.yaw_sector << ',' << (sample.accepted ? "true" : "false") << ','
         << number(sample.center.x) << ',' << number(sample.center.y) << ',' << number(sample.center.x) << ','
         << number(sample.center.x - run.dataset.recorded_mount.x_m) << ','
-        << number(sample.icp.trimmed_rmse_m) << ',' << number(sample.icp.overlap_ratio) << ','
-        << '"' << jsonEscape(sample.rejection_reason) << "\"\n";
+        << csvNumber(sample.icp.trimmed_rmse_m) << ',' << csvNumber(sample.icp.overlap_ratio) << ','
+        << csvField(sample.rejection_reason) << "\n";
   }
   return csv.str();
 }
@@ -205,35 +222,108 @@ std::string reportHtml(const CalibrationRun& run) {
   std::ostringstream html;
   html << R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lidar rotation-center calibration</title><style>
-:root{font-family:system-ui,sans-serif;color:#17202a;background:#f5f7fa}body{margin:0;padding:20px}main{max-width:1180px;margin:auto}section{background:#fff;border:1px solid #d9e0e8;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 3px #10203018}h1{margin-top:0}.status{font-size:1.3rem;font-weight:700}.warning{color:#9b2c2c;background:#fff4f4;padding:10px;border-radius:6px}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{padding:7px;border-bottom:1px solid #e5e9ef;text-align:left}canvas{display:block;width:100%;height:auto;max-width:900px;margin:8px auto;border:1px solid #d9e0e8;background:#fff} .maps{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.map-card{min-width:0}@media(max-width:900px){table{display:block;overflow-x:auto;white-space:nowrap}}@media(max-width:600px){body{padding:8px}.maps{grid-template-columns:1fr}section{padding:10px}table{font-size:.75rem}}
+:root{font-family:system-ui,sans-serif;color:#17202a;background:#f5f7fa}body{margin:0;padding:20px}main{max-width:1180px;margin:auto}section{background:#fff;border:1px solid #d9e0e8;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 3px #10203018}h1{margin-top:0}.status{font-size:1.3rem;font-weight:700}.warning{color:#9b2c2c;background:#fff4f4;padding:10px;border-radius:6px}.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:.85rem}.legend span{white-space:nowrap}.swatch{display:inline-block;width:.8em;height:.8em;border-radius:50%;margin-right:4px}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{padding:7px;border-bottom:1px solid #e5e9ef;text-align:left}canvas{display:block;width:100%;height:auto;max-width:900px;margin:8px auto;border:1px solid #d9e0e8;background:#fff} .maps{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.map-card{min-width:0}@media(max-width:900px){table{display:block;overflow-x:auto;white-space:nowrap}}@media(max-width:600px){body{padding:8px}.maps{grid-template-columns:1fr}section{padding:10px}table{font-size:.75rem}}
 </style></head><body><main><h1>Lidar rotation-center calibration</h1>
 <section><div class="status" id="classification"></div><div id="warning"></div><p>Recorded offset: <span id="recorded"></span> m; estimated offset: <span id="estimated"></span> m</p></section>
-<section><h2>Raw center scatter</h2><p>Accepted center samples (blue), Rejected center samples (red), Recorded center (gold).</p><canvas id="center-scatter" width="900" height="360" aria-label="Raw center scatter"></canvas></section>
+<section><h2>Raw center scatter</h2><p>Accepted samples use method colors; rejected samples are outlined in red. Recorded center is gold.</p><div class="legend" id="center-legend"><span><i class="swatch" style="background:#2563eb"></i>Odom</span><span><i class="swatch" style="background:#16a34a"></i>IMU</span><span><i class="swatch" style="background:#9333ea"></i>Existing /scan</span><span><i class="swatch" style="background:#d4a017"></i>Recorded center</span></div><canvas id="center-scatter" width="900" height="360" aria-label="Raw center scatter"></canvas></section>
 <section><h2>Method estimates</h2><table><thead><tr><th>Method</th><th>Center x</th><th>Center y</th><th>Forward offset</th><th>Delta</th><th>95% CI</th><th>Accepted/attempted</th><th>Sectors</th><th>RMSE</th><th>Overlap</th></tr></thead><tbody id="methods"></tbody></table></section>
 <section><h2>Sharpness curve</h2><canvas id="sharpness" width="900" height="360" aria-label="Map sharpness curve"></canvas></section>
 <section><h2>Map views</h2><div class="maps"><div class="map-card"><h3>Recorded map view</h3><canvas id="recorded-map" width="600" height="360" aria-label="Recorded map view"></canvas></div><div class="map-card"><h3>Estimated map view</h3><canvas id="estimated-map" width="600" height="360" aria-label="Estimated map view"></canvas></div></div></section>
 <script>const calibration=)HTML" << json << R"HTML(;
-const recorded=calibration.recorded_mount.x_m;document.getElementById('classification').textContent=calibration.aggregate.classification;document.getElementById('recorded').textContent=recorded.toFixed(3);document.getElementById('estimated').textContent=calibration.aggregate.consensus_offset_m.toFixed(3);document.getElementById('warning').textContent=calibration.aggregate.reason||calibration.sharpness.rejection_reason;
-const methods=document.getElementById('methods');calibration.methods.forEach(m=>{const row=document.createElement('tr');[m.method,m.center_x_m.toFixed(3),m.center_y_m.toFixed(3),m.forward_offset_m.toFixed(3),m.delta_from_recorded_m.toFixed(3),`[${m.confidence_95_m.low_m.toFixed(3)}, ${m.confidence_95_m.high_m.toFixed(3)}]`,`${m.accepted_pairs}/${m.attempted_pairs}`,m.covered_yaw_sectors,m.median_rmse_m.toFixed(3),m.median_overlap.toFixed(3)].forEach(v=>{const cell=document.createElement('td');cell.textContent=v;row.appendChild(cell)});methods.appendChild(row)});
-function context(id){const c=document.getElementById(id),x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);x.strokeStyle='#cbd5e1';x.strokeRect(0,0,c.width,c.height);return [c,x]};function plotCenters(){const [c,x]=context('center-scatter');const sx=v=>50+(v+0.05)*700,sy=v=>310-(v+0.30)*700;x.strokeStyle='#94a3b8';x.beginPath();x.moveTo(sx(0),20);x.lineTo(sx(0),340);x.moveTo(40,sy(0));x.lineTo(860,sy(0));x.stroke();calibration.center_samples.forEach(s=>{x.fillStyle=s.accepted?'#2563eb':'#dc2626';x.beginPath();x.arc(sx(s.center_x_m-recorded),sy(s.center_y_m),s.accepted?3:4,0,Math.PI*2);x.fill()});x.fillStyle='#d4a017';x.beginPath();x.arc(sx(0),sy(0),7,0,Math.PI*2);x.fill()};function plotSharpness(){const [c,x]=context('sharpness');const p=calibration.sharpness.coarse.concat(calibration.sharpness.refined).filter(q=>Number.isFinite(q.score));if(!p.length)return;const lo=Math.min(...p.map(q=>q.offset_m)),hi=Math.max(...p.map(q=>q.offset_m)),max=Math.max(...p.map(q=>q.score));const sx=v=>40+(v-lo)/(hi-lo)*820,sy=v=>330-v/max*290;x.strokeStyle='#0f766e';x.beginPath();p.forEach((q,i)=>{if(i===0)x.moveTo(sx(q.offset_m),sy(q.score));else x.lineTo(sx(q.offset_m),sy(q.score))});x.stroke();x.fillStyle='#b91c1c';x.beginPath();x.arc(sx(calibration.sharpness.best_offset_m),sy(Math.min(...p.map(q=>q.score))),5,0,Math.PI*2);x.fill()};function plotMap(id,key){const [c,x]=context(id),p=calibration.maps[key];if(!p.length)return;const loX=Math.min(...p.map(q=>q[0])),hiX=Math.max(...p.map(q=>q[0])),loY=Math.min(...p.map(q=>q[1])),hiY=Math.max(...p.map(q=>q[1]));const sx=v=>20+(v-loX)/(hiX-loX||1)*560,sy=v=>340-(v-loY)/(hiY-loY||1)*320;x.fillStyle='#475569';p.forEach(q=>{x.beginPath();x.arc(sx(q[0]),sy(q[1]),1.5,0,Math.PI*2);x.fill()})};plotCenters();plotSharpness();plotMap('recorded-map','recorded');plotMap('estimated-map','estimated');</script></main></body></html>)HTML";
+const finite=v=>typeof v==='number'&&Number.isFinite(v);const fixed=v=>finite(v)?v.toFixed(3):'—';const recorded=calibration.recorded_mount.x_m;document.getElementById('classification').textContent=calibration.aggregate.classification;document.getElementById('recorded').textContent=fixed(recorded);document.getElementById('estimated').textContent=fixed(calibration.aggregate.consensus_offset_m);document.getElementById('warning').textContent=calibration.aggregate.reason||calibration.sharpness.rejection_reason;
+const methods=document.getElementById('methods');calibration.methods.forEach(m=>{const row=document.createElement('tr');[m.method,fixed(m.center_x_m),fixed(m.center_y_m),fixed(m.forward_offset_m),fixed(m.delta_from_recorded_m),`[${fixed(m.confidence_95_m.low_m)}, ${fixed(m.confidence_95_m.high_m)}]`,`${m.accepted_pairs}/${m.attempted_pairs}`,m.covered_yaw_sectors,fixed(m.median_rmse_m),fixed(m.median_overlap)].forEach(v=>{const cell=document.createElement('td');cell.textContent=v;row.appendChild(cell)});methods.appendChild(row)});
+const methodColors={'Odom':'#2563eb','IMU':'#16a34a','Existing /scan':'#9333ea'};function context(id){const c=document.getElementById(id),x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);x.strokeStyle='#cbd5e1';x.strokeRect(0,0,c.width,c.height);return [c,x]};function plotCenters(){const [c,x]=context('center-scatter');const sx=v=>50+(v+0.05)*700,sy=v=>310-(v+0.30)*700;x.strokeStyle='#94a3b8';x.beginPath();x.moveTo(sx(0),20);x.lineTo(sx(0),340);x.moveTo(40,sy(0));x.lineTo(860,sy(0));x.stroke();calibration.center_samples.forEach(s=>{if(!finite(s.center_x_m)||!finite(s.center_y_m))return;const px=sx(s.center_x_m-recorded),py=sy(s.center_y_m);x.beginPath();x.arc(px,py,s.accepted?4:5,0,Math.PI*2);if(s.accepted){x.fillStyle=methodColors[s.method]||'#475569';x.fill()}else{x.strokeStyle='#dc2626';x.lineWidth=2;x.stroke();x.lineWidth=1}});if(finite(recorded)){x.fillStyle='#d4a017';x.beginPath();x.arc(sx(0),sy(0),7,0,Math.PI*2);x.fill()}};function drawSeries(x,series,stroke,lo,hi,max){const points=series.filter(q=>finite(q.offset_m)&&finite(q.score));if(!points.length)return;x.strokeStyle=stroke;x.beginPath();points.forEach((q,i)=>{const px=40+(q.offset_m-lo)/(hi-lo||1)*820,py=330-q.score/(max||1)*290;if(i===0)x.moveTo(px,py);else x.lineTo(px,py)});x.stroke()};function plotSharpness(){const [c,x]=context('sharpness');const p=calibration.sharpness.coarse.concat(calibration.sharpness.refined).filter(q=>finite(q.offset_m)&&finite(q.score));if(!p.length)return;const lo=Math.min(...p.map(q=>q.offset_m)),hi=Math.max(...p.map(q=>q.offset_m)),max=Math.max(...p.map(q=>q.score),1);drawSeries(x,calibration.sharpness.coarse,'#0f766e',lo,hi,max);drawSeries(x,calibration.sharpness.refined,'#f97316',lo,hi,max);if(finite(calibration.sharpness.best_offset_m)){x.fillStyle='#b91c1c';x.beginPath();x.arc(40+(calibration.sharpness.best_offset_m-lo)/(hi-lo||1)*820,330-(Math.min(...p.map(q=>q.score))/(max||1))*290,5,0,Math.PI*2);x.fill()}};function plotMap(id,key){const [c,x]=context(id),p=calibration.maps[key].filter(q=>Array.isArray(q)&&finite(q[0])&&finite(q[1]));if(!p.length)return;const loX=Math.min(...p.map(q=>q[0])),hiX=Math.max(...p.map(q=>q[0])),loY=Math.min(...p.map(q=>q[1])),hiY=Math.max(...p.map(q=>q[1]));const sx=v=>20+(v-loX)/(hiX-loX||1)*560,sy=v=>340-(v-loY)/(hiY-loY||1)*320;x.fillStyle='#475569';p.forEach(q=>{x.beginPath();x.arc(sx(q[0]),sy(q[1]),1.5,0,Math.PI*2);x.fill()})};plotCenters();plotSharpness();plotMap('recorded-map','recorded');plotMap('estimated-map','estimated');</script></main></body></html>)HTML";
   return html.str();
 }
 
-void atomicWrite(const std::filesystem::path& path, const std::string& content) {
-  static std::uint64_t counter = 0;
-  const auto temporary = path.string() + ".tmp." + std::to_string(++counter);
-  {
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output) throw std::runtime_error("cannot create temporary output " + temporary);
-    output << content;
-    output.flush();
-    if (!output) throw std::runtime_error("cannot finish temporary output " + temporary);
+struct PendingOutput {
+  std::filesystem::path final_path;
+  std::filesystem::path temporary_path;
+  std::filesystem::path backup_path;
+  bool had_original{};
+  bool published{};
+};
+
+std::filesystem::path uniqueSibling(const std::filesystem::path& path, const char* tag) {
+  static std::atomic<std::uint64_t> counter{0};
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  for (std::uint64_t attempt = 0; attempt < 100; ++attempt) {
+    const auto suffix = std::string(".") + tag + "." + std::to_string(static_cast<long long>(::getpid())) +
+      "." + std::to_string(stamp) + "." +
+      std::to_string(counter.fetch_add(1) + attempt);
+    const auto candidate = path.string() + suffix;
+    const int fd = ::open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd >= 0) {
+      ::close(fd);
+      return candidate;
+    }
+    if (errno != EEXIST) throw std::runtime_error("cannot reserve temporary output " + candidate);
   }
+  throw std::runtime_error("cannot reserve unique temporary output " + path.string());
+}
+
+void removeIfExists(const std::filesystem::path& path) {
   std::error_code error;
-  std::filesystem::rename(temporary, path, error);
-  if (error) {
-    std::filesystem::remove(temporary);
-    throw std::runtime_error("cannot atomically publish output " + path.string() + ": " + error.message());
+  std::filesystem::remove(path, error);
+}
+
+void writeTemporary(const std::filesystem::path& path, const std::string& content) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) throw std::runtime_error("cannot open temporary output " + path.string());
+  output.write(content.data(), static_cast<std::streamsize>(content.size()));
+  output.flush();
+  if (!output) throw std::runtime_error("cannot finish temporary output " + path.string());
+}
+
+void publishReportSet(const std::vector<std::pair<std::filesystem::path, std::string>>& files,
+                      bool overwrite) {
+  std::vector<PendingOutput> pending;
+  pending.reserve(files.size());
+  try {
+    for (const auto& [final_path, content] : files) {
+      PendingOutput item;
+      item.final_path = final_path;
+      item.temporary_path = uniqueSibling(final_path, "tmp");
+      pending.push_back(std::move(item));
+      const char* write_failure = std::getenv("TASK5_REPORT_FAIL_WRITE_INDEX");
+      if (write_failure != nullptr && pending.size() - 1U == static_cast<std::size_t>(std::stoul(write_failure))) {
+        throw std::runtime_error("injected report write failure");
+      }
+      writeTemporary(pending.back().temporary_path, content);
+    }
+    for (auto& item : pending) {
+      std::error_code exists_error;
+      item.had_original = std::filesystem::exists(item.final_path, exists_error);
+      if (exists_error) throw std::runtime_error("cannot inspect output " + item.final_path.string());
+      if (item.had_original) {
+        if (!overwrite) throw std::runtime_error("output file exists; use --overwrite");
+        item.backup_path = uniqueSibling(item.final_path, "bak");
+        std::filesystem::rename(item.final_path, item.backup_path);
+      }
+    }
+    const char* failure = std::getenv("TASK5_REPORT_FAIL_PUBLISH_INDEX");
+    const auto failure_index = failure == nullptr ? files.size() : static_cast<std::size_t>(std::stoul(failure));
+    for (std::size_t index = 0; index < pending.size(); ++index) {
+      if (index == failure_index) throw std::runtime_error("injected report publication failure");
+      std::filesystem::rename(pending[index].temporary_path, pending[index].final_path);
+      pending[index].published = true;
+    }
+    for (const auto& item : pending) removeIfExists(item.backup_path);
+  } catch (...) {
+    for (auto& item : pending) {
+      if (item.published) removeIfExists(item.final_path);
+      removeIfExists(item.temporary_path);
+    }
+    for (auto& item : pending) {
+      if (item.had_original && std::filesystem::exists(item.backup_path)) {
+        std::error_code restore_error;
+        std::filesystem::rename(item.backup_path, item.final_path, restore_error);
+        if (restore_error) removeIfExists(item.backup_path);
+      } else {
+        removeIfExists(item.backup_path);
+      }
+    }
+    throw;
   }
 }
 
@@ -250,10 +340,11 @@ void writeCalibrationReport(const CalibrationRun& run) {
       throw std::runtime_error("cannot create output directory: " + error.message());
     }
   }
-  atomicWrite(output / "calibration.json", jsonDocument(run));
-  atomicWrite(output / "centers.csv", centersCsv(run));
-  atomicWrite(output / "sharpness.csv", sharpnessCsv(run));
-  atomicWrite(output / "report.html", reportHtml(run));
+  publishReportSet({
+    {output / "calibration.json", jsonDocument(run)},
+    {output / "centers.csv", centersCsv(run)},
+    {output / "sharpness.csv", sharpnessCsv(run)},
+    {output / "report.html", reportHtml(run)}}, run.config.overwrite);
 }
 
 }  // namespace orb_lidar_mapper

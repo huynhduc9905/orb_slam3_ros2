@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -12,7 +14,7 @@
 namespace orb_lidar_mapper {
 namespace {
 
-CalibrationRun fixture(const std::filesystem::path& output) {
+CalibrationRun fixture(const std::filesystem::path& output, bool inconclusive = false) {
   CalibrationRun run;
   run.config.output_dir = output;
   run.config.bag_path = "/immutable/fixture.mcap";
@@ -39,7 +41,8 @@ CalibrationRun fixture(const std::filesystem::path& output) {
   rejected.source_scan_id = 11;
   rejected.target_scan_id = 12;
   rejected.accepted = false;
-  rejected.rejection_reason = "poor_overlap";
+  rejected.center = {0.280, -0.006};
+  rejected.rejection_reason = "quote, \"comma\" and newline\nreason";
   run.center_samples.push_back(rejected);
   for (std::size_t i = 0; i < 3; ++i) {
     CenterSample accepted;
@@ -47,7 +50,7 @@ CalibrationRun fixture(const std::filesystem::path& output) {
     accepted.source_scan_id = 20 + i;
     accepted.target_scan_id = 30 + i;
     accepted.accepted = true;
-    accepted.center = {0.245 + 0.001 * static_cast<double>(i), 0.002};
+    accepted.center = {i == 0 ? 0.210 : (i == 1 ? 0.235 : 0.300), 0.002};
     accepted.icp.trimmed_rmse_m = 0.012;
     accepted.icp.overlap_ratio = 0.72;
     run.center_samples.push_back(accepted);
@@ -60,6 +63,26 @@ CalibrationRun fixture(const std::filesystem::path& output) {
   run.aggregate.consensus_offset_m = 0.245;
   run.aggregate.confidence_95_m = {0.240, 0.250};
   run.aggregate.reason = "fixture";
+  if (inconclusive) {
+    run.methods[1].reliable = false;
+    run.methods[1].center_x_m = std::numeric_limits<double>::quiet_NaN();
+    run.methods[1].center_y_m = std::numeric_limits<double>::infinity();
+    run.methods[1].forward_offset_m = std::numeric_limits<double>::quiet_NaN();
+    run.methods[1].confidence_95_m = {std::numeric_limits<double>::quiet_NaN(),
+                                      std::numeric_limits<double>::infinity()};
+    run.methods[1].median_rmse_m = std::numeric_limits<double>::infinity();
+    run.methods[1].median_overlap = std::numeric_limits<double>::quiet_NaN();
+    run.aggregate.classification = ResultClass::kInconclusive;
+    run.aggregate.consensus_offset_m = std::numeric_limits<double>::quiet_NaN();
+    run.aggregate.confidence_95_m = {std::numeric_limits<double>::quiet_NaN(),
+                                     std::numeric_limits<double>::infinity()};
+    run.sharpness.reliable = false;
+    run.sharpness.best_offset_m = std::numeric_limits<double>::quiet_NaN();
+    run.sharpness.coarse.push_back({std::numeric_limits<double>::quiet_NaN(),
+                                    std::numeric_limits<double>::infinity()});
+    run.sharpness.refined.push_back({std::numeric_limits<double>::infinity(),
+                                     std::numeric_limits<double>::quiet_NaN()});
+  }
   return run;
 }
 
@@ -80,7 +103,7 @@ TEST(CalibrationReport, WritesSelfContainedOutputsAtomically) {
   EXPECT_NE(json_text.find("\"center_samples\":["), std::string::npos);
   std::ifstream centers(output / "centers.csv");
   const std::string centers_text((std::istreambuf_iterator<char>(centers)), {});
-  EXPECT_NE(centers_text.find("poor_overlap"), std::string::npos);
+  EXPECT_NE(centers_text.find("\"\"comma\"\""), std::string::npos);
   std::ifstream sharpness(output / "sharpness.csv");
   const std::string sharpness_text((std::istreambuf_iterator<char>(sharpness)), {});
   EXPECT_NE(sharpness_text.find("0.180"), std::string::npos);
@@ -88,10 +111,69 @@ TEST(CalibrationReport, WritesSelfContainedOutputsAtomically) {
   const std::string html_text((std::istreambuf_iterator<char>(html)), {});
   EXPECT_NE(html_text.find("Existing /scan"), std::string::npos);
   EXPECT_NE(html_text.find("Raw center scatter"), std::string::npos);
-  EXPECT_NE(html_text.find("Rejected center samples"), std::string::npos);
+  EXPECT_NE(html_text.find("rejected samples are outlined"), std::string::npos);
   EXPECT_EQ(html_text.find("src=\"http"), std::string::npos);
   EXPECT_EQ(html_text.find("href=\"http"), std::string::npos);
   if (std::getenv("TASK5_REPORT_FIXTURE_DIR") == nullptr) std::filesystem::remove_all(output);
+}
+
+TEST(CalibrationReport, WritesParseableNullsForInconclusiveScientificValues) {
+  const auto output = std::getenv("TASK5_REPORT_INCONCLUSIVE_FIXTURE_DIR") != nullptr
+    ? std::filesystem::path(std::getenv("TASK5_REPORT_INCONCLUSIVE_FIXTURE_DIR"))
+    : std::filesystem::temp_directory_path() / "lidar-calibration-report-inconclusive";
+  if (std::getenv("TASK5_REPORT_INCONCLUSIVE_FIXTURE_DIR") == nullptr) {
+    std::filesystem::remove_all(output);
+  }
+  ASSERT_NO_THROW(writeCalibrationReport(fixture(output, true)));
+  std::ifstream json(output / "calibration.json");
+  const std::string text((std::istreambuf_iterator<char>(json)), {});
+  EXPECT_EQ(text.find("nan"), std::string::npos);
+  EXPECT_EQ(text.find("inf"), std::string::npos);
+  EXPECT_NE(text.find(":null"), std::string::npos);
+  if (std::getenv("TASK5_REPORT_INCONCLUSIVE_FIXTURE_DIR") == nullptr) {
+    std::filesystem::remove_all(output);
+  }
+}
+
+TEST(CalibrationReport, RollsBackWholeSetWhenLatePublicationFails) {
+  const auto output = std::filesystem::temp_directory_path() / "lidar-calibration-report-rollback";
+  std::filesystem::remove_all(output);
+  ASSERT_NO_THROW(writeCalibrationReport(fixture(output)));
+  const std::string old_json = [] (const auto& path) {
+    std::ifstream input(path);
+    return std::string((std::istreambuf_iterator<char>(input)), {});
+  }(output / "calibration.json");
+  auto replacement = fixture(output);
+  replacement.config.overwrite = true;
+  setenv("TASK5_REPORT_FAIL_PUBLISH_INDEX", "2", 1);
+  EXPECT_THROW(writeCalibrationReport(replacement), std::runtime_error);
+  unsetenv("TASK5_REPORT_FAIL_PUBLISH_INDEX");
+  std::ifstream restored(output / "calibration.json");
+  EXPECT_EQ(std::string((std::istreambuf_iterator<char>(restored)), {}), old_json);
+  for (const auto& name : {"calibration.json", "centers.csv", "sharpness.csv", "report.html"}) {
+    EXPECT_TRUE(std::filesystem::is_regular_file(output / name));
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(output)) {
+    EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+    EXPECT_EQ(entry.path().filename().string().find(".bak."), std::string::npos);
+  }
+  std::filesystem::remove_all(output);
+}
+
+TEST(CalibrationReport, CleansAllTempsWhenLateWriteFails) {
+  const auto output = std::filesystem::temp_directory_path() / "lidar-calibration-report-write-failure";
+  std::filesystem::remove_all(output);
+  setenv("TASK5_REPORT_FAIL_WRITE_INDEX", "3", 1);
+  EXPECT_THROW(writeCalibrationReport(fixture(output)), std::runtime_error);
+  unsetenv("TASK5_REPORT_FAIL_WRITE_INDEX");
+  if (std::filesystem::exists(output)) {
+    for (const auto& entry : std::filesystem::directory_iterator(output)) {
+      EXPECT_EQ(entry.path().filename().string().find(".tmp."), std::string::npos);
+      EXPECT_EQ(entry.path().filename().string().find(".bak."), std::string::npos);
+      EXPECT_FALSE(std::filesystem::is_regular_file(entry.path()));
+    }
+  }
+  std::filesystem::remove_all(output);
 }
 
 TEST(CalibrationReport, RefusesOverwriteUnlessExplicitlyEnabled) {
