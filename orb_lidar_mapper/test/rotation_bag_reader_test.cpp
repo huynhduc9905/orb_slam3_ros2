@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <unistd.h>
 
 #include <gmock/gmock.h>
@@ -45,6 +46,7 @@ struct BagOptions {
   float scan_time_increment = 0.0F;
   float scan_time = 0.0F;
   std::vector<float> raw_ranges = {2.0F, 2.1F};
+  std::vector<std::pair<std::int64_t, double>> imu_samples = {{1'000'000'000LL, 0.25}};
 };
 
 TempBag writeCalibrationBag(const BagOptions& options = {}) {
@@ -79,10 +81,13 @@ TempBag writeCalibrationBag(const BagOptions& options = {}) {
   writer.write(odom, "/odom", rclcpp::Time(1'000'000'000LL));
 
   if (options.include_imu) {
-    sensor_msgs::msg::Imu imu;
-    addHeader(imu.header, 1'000'000'000LL);
-    imu.angular_velocity.z = 0.25;
-    writer.write(imu, "/imu", rclcpp::Time(1'000'000'000LL));
+    std::size_t imu_index = 0;
+    for (const auto& [stamp_ns, yaw_rate] : options.imu_samples) {
+      sensor_msgs::msg::Imu imu;
+      addHeader(imu.header, stamp_ns);
+      imu.angular_velocity.z = yaw_rate;
+      writer.write(imu, "/imu", rclcpp::Time(1'000'000'000LL + imu_index++));
+    }
   }
 
   {
@@ -135,6 +140,38 @@ TEST(RotationBagReader, MissingImuFailsClosed) {
   } catch (const std::runtime_error& error) {
     EXPECT_THAT(error.what(), testing::HasSubstr("/imu"));
   }
+  rclcpp::shutdown();
+}
+
+TEST(RotationBagReader, AveragesContiguousDuplicateImuStamps) {
+  rclcpp::init(0, nullptr);
+  BagOptions options;
+  options.imu_samples = {{1'000'000'000LL, 0.1},
+                         {1'000'000'000LL, 0.3},
+                         {1'000'000'000LL, 0.5},
+                         {1'011'000'000LL, 0.7}};
+  RotationDataset data;
+  try {
+    data = RotationBagReader::read(writeCalibrationBag(options).path());
+  } catch (const std::runtime_error& error) {
+    rclcpp::shutdown();
+    FAIL() << error.what();
+  }
+  ASSERT_EQ(data.imu_yaw_rates.size(), 2U);
+  EXPECT_EQ(data.imu_yaw_rates[0].stamp_ns, 1'000'000'000LL);
+  EXPECT_DOUBLE_EQ(data.imu_yaw_rates[0].omega_rad_s, 0.3);
+  EXPECT_EQ(data.imu_yaw_rates[1].stamp_ns, 1'011'000'000LL);
+  EXPECT_DOUBLE_EQ(data.imu_yaw_rates[1].omega_rad_s, 0.7);
+  rclcpp::shutdown();
+}
+
+TEST(RotationBagReader, RejectsDecreasingImuStamps) {
+  rclcpp::init(0, nullptr);
+  BagOptions options;
+  options.imu_samples = {{1'000'000'000LL, 0.1},
+                         {999'000'000LL, 0.3}};
+  EXPECT_THROW(RotationBagReader::read(writeCalibrationBag(options).path()),
+               std::runtime_error);
   rclcpp::shutdown();
 }
 

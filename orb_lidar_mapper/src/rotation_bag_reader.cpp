@@ -115,11 +115,23 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
   reader.open({bag_path.string(), "mcap"}, {"cdr", "cdr"});
   RotationDataset data;
   std::map<std::string, bool> seen;
-  std::int64_t previous_raw = 0, previous_undistorted = 0, previous_odom = 0,
-               previous_imu = 0;
+  std::int64_t previous_raw = 0, previous_undistorted = 0, previous_odom = 0;
   bool have_raw = false, have_undistorted = false, have_odom = false, have_imu = false;
   bool have_mount = false;
   std::uint64_t raw_id = 0, undistorted_id = 0;
+  std::int64_t pending_imu_stamp = 0;
+  double pending_imu_sum = 0.0;
+  std::size_t pending_imu_count = 0;
+
+  const auto flushImu = [&]() {
+    if (pending_imu_count == 0) {
+      return;
+    }
+    data.imu_yaw_rates.push_back(
+      {pending_imu_stamp, pending_imu_sum / static_cast<double>(pending_imu_count)});
+    pending_imu_sum = 0.0;
+    pending_imu_count = 0;
+  };
 
   while (reader.has_next()) {
     const auto message = reader.read_next();
@@ -154,9 +166,23 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
     } else if (topic == kImuTopic) {
       auto imu = deserialize<sensor_msgs::msg::Imu>(*message);
       const auto stamp = stampNs(imu.header.stamp);
-      requireMonotonic(stamp, previous_imu, have_imu, kImuTopic);
       requireFinite(imu.angular_velocity.z, "/imu angular_velocity.z");
-      data.imu_yaw_rates.push_back({stamp, imu.angular_velocity.z});
+      if (!have_imu) {
+        pending_imu_stamp = stamp;
+        pending_imu_sum = imu.angular_velocity.z;
+        pending_imu_count = 1;
+        have_imu = true;
+      } else if (stamp < pending_imu_stamp) {
+        throw std::runtime_error("non-monotonic stamps on /imu");
+      } else if (stamp == pending_imu_stamp) {
+        pending_imu_sum += imu.angular_velocity.z;
+        ++pending_imu_count;
+      } else {
+        flushImu();
+        pending_imu_stamp = stamp;
+        pending_imu_sum = imu.angular_velocity.z;
+        pending_imu_count = 1;
+      }
     } else if (topic == kStaticTfTopic) {
       auto tf = deserialize<tf2_msgs::msg::TFMessage>(*message);
       for (const auto& transform : tf.transforms) {
@@ -179,6 +205,8 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
       }
     }
   }
+
+  flushImu();
 
   for (const char* topic : {kRawTopic, kUndistortedTopic, kOdomTopic, kImuTopic, kStaticTfTopic}) {
     if (!seen[topic]) {
