@@ -1,6 +1,7 @@
 build/
 install/
 log/
+.worktrees/
 node_modules/
 dist/
 artifacts/
