@@ -49,6 +49,8 @@ target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_calibration PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+target_include_directories(${PROJECT_NAME}_calibration SYSTEM PUBLIC
+  ${PCL_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME}_calibration
   ${PROJECT_NAME}_core ${PCL_LIBRARIES})
 ament_target_dependencies(${PROJECT_NAME}_calibration
@@ -111,4 +113,5 @@ ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp tf2 tf2_ros tf2_geometry_msgs
   sensor_msgs nav_msgs geometry_msgs visualization_msgs
   diagnostic_msgs std_msgs orb_slam3_msgs rosbag2_cpp tf2_msgs pcl_conversions)
+ament_export_dependencies(PCL)
 ament_package()

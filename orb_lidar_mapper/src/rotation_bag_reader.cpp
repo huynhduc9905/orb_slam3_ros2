@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/serialization.hpp>
@@ -70,11 +71,24 @@ void requireMonotonic(std::int64_t stamp, std::int64_t& previous,
   have_previous = true;
 }
 
-ScanValue convertScan(const sensor_msgs::msg::LaserScan& message, std::uint64_t id) {
+ScanValue convertScan(const sensor_msgs::msg::LaserScan& message, std::uint64_t id,
+                      bool require_zero_timing) {
   requireFinite(message.angle_min, "scan angle_min");
+  requireFinite(message.angle_max, "scan angle_max");
   requireFinite(message.angle_increment, "scan angle_increment");
+  requireFinite(message.time_increment, "scan time_increment");
+  requireFinite(message.scan_time, "scan scan_time");
   requireFinite(message.range_min, "scan range_min");
   requireFinite(message.range_max, "scan range_max");
+  if (message.angle_increment == 0.0F || message.range_min < 0.0F ||
+      message.range_max <= message.range_min || message.time_increment < 0.0F ||
+      message.scan_time < 0.0F) {
+    throw std::runtime_error("physically invalid scan metadata");
+  }
+  if (require_zero_timing &&
+      (message.time_increment != 0.0F || message.scan_time != 0.0F)) {
+    throw std::runtime_error("nonzero timing on /scan");
+  }
   if (message.ranges.empty()) {
     throw std::runtime_error("empty scan");
   }
@@ -115,12 +129,12 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
       auto scan = deserialize<sensor_msgs::msg::LaserScan>(*message);
       const auto stamp = stampNs(scan.header.stamp);
       requireMonotonic(stamp, previous_raw, have_raw, kRawTopic);
-      data.raw_scans.push_back(convertScan(scan, raw_id++));
+      data.raw_scans.push_back(convertScan(scan, raw_id++, false));
     } else if (topic == kUndistortedTopic) {
       auto scan = deserialize<sensor_msgs::msg::LaserScan>(*message);
       const auto stamp = stampNs(scan.header.stamp);
       requireMonotonic(stamp, previous_undistorted, have_undistorted, kUndistortedTopic);
-      data.undistorted_scans.push_back(convertScan(scan, undistorted_id++));
+      data.undistorted_scans.push_back(convertScan(scan, undistorted_id++, true));
     } else if (topic == kOdomTopic) {
       auto odom = deserialize<nav_msgs::msg::Odometry>(*message);
       const auto stamp = stampNs(odom.header.stamp);
@@ -193,6 +207,20 @@ std::vector<MotionInterval> selectStableRotationIntervals(
     throw std::invalid_argument("invalid stable-rotation selector limits");
   }
   std::vector<MotionInterval> intervals;
+  std::vector<std::int64_t> positive_gaps;
+  for (std::size_t i = 1; i < dataset.odom_twists.size(); ++i) {
+    const auto gap = dataset.odom_twists[i].stamp_ns -
+                     dataset.odom_twists[i - 1].stamp_ns;
+    if (gap > 0) {
+      positive_gaps.push_back(gap);
+    }
+  }
+  if (positive_gaps.empty()) {
+    return intervals;
+  }
+  std::sort(positive_gaps.begin(), positive_gaps.end());
+  const auto normal_cadence_ns = positive_gaps[positive_gaps.size() / 2];
+  const auto maximum_contiguous_gap_ns = normal_cadence_ns * 2;
   std::optional<MotionInterval> current;
   for (const auto& sample : dataset.odom_twists) {
     const double abs_omega = std::abs(sample.twist.omega);
@@ -208,6 +236,11 @@ std::vector<MotionInterval> selectStableRotationIntervals(
       continue;
     }
     if (!current) {
+      current = MotionInterval{sample.stamp_ns, sample.stamp_ns};
+    } else if (sample.stamp_ns - current->end_ns > maximum_contiguous_gap_ns) {
+      if (current->end_ns - current->start_ns >= minimum_duration_ns) {
+        intervals.push_back(*current);
+      }
       current = MotionInterval{sample.stamp_ns, sample.stamp_ns};
     } else {
       current->end_ns = sample.stamp_ns;
