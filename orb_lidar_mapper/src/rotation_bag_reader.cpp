@@ -120,7 +120,7 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
   bool have_mount = false;
   std::uint64_t raw_id = 0, undistorted_id = 0;
   std::int64_t pending_imu_stamp = 0;
-  double pending_imu_sum = 0.0;
+  long double pending_imu_sum = 0.0L;
   std::size_t pending_imu_count = 0;
 
   const auto flushImu = [&]() {
@@ -128,8 +128,9 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
       return;
     }
     data.imu_yaw_rates.push_back(
-      {pending_imu_stamp, pending_imu_sum / static_cast<double>(pending_imu_count)});
-    pending_imu_sum = 0.0;
+      {pending_imu_stamp, static_cast<double>(
+          pending_imu_sum / static_cast<long double>(pending_imu_count))});
+    pending_imu_sum = 0.0L;
     pending_imu_count = 0;
   };
 

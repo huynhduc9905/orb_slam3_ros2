@@ -1,3 +1,4 @@
+#include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -172,6 +173,30 @@ TEST(RotationBagReader, RejectsDecreasingImuStamps) {
                          {999'000'000LL, 0.3}};
   EXPECT_THROW(RotationBagReader::read(writeCalibrationBag(options).path()),
                std::runtime_error);
+  rclcpp::shutdown();
+}
+
+TEST(RotationBagReader, AveragesFiniteExtremeDuplicateImuRates) {
+  rclcpp::init(0, nullptr);
+  BagOptions options;
+  options.imu_samples = {{1'000'000'000LL, DBL_MAX},
+                         {1'000'000'000LL, DBL_MAX},
+                         {1'000'000'000LL, -DBL_MAX},
+                         {1'000'000'000LL, -DBL_MAX}};
+  const auto data = RotationBagReader::read(writeCalibrationBag(options).path());
+  ASSERT_EQ(data.imu_yaw_rates.size(), 1U);
+  EXPECT_DOUBLE_EQ(data.imu_yaw_rates[0].omega_rad_s, 0.0);
+  rclcpp::shutdown();
+}
+
+TEST(RotationBagReader, AveragesPositiveFiniteExtremeDuplicateImuRates) {
+  rclcpp::init(0, nullptr);
+  BagOptions options;
+  options.imu_samples = {{1'000'000'000LL, DBL_MAX},
+                         {1'000'000'000LL, DBL_MAX}};
+  const auto data = RotationBagReader::read(writeCalibrationBag(options).path());
+  ASSERT_EQ(data.imu_yaw_rates.size(), 1U);
+  EXPECT_DOUBLE_EQ(data.imu_yaw_rates[0].omega_rad_s, DBL_MAX);
   rclcpp::shutdown();
 }
 
