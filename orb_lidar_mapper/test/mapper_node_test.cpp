@@ -1032,6 +1032,9 @@ TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   EXPECT_NEAR(mapper_->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       20.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("hit_range_max_m").as_double(), 10.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("hit_log_odds").as_double(), 0.55, 1e-6);
+  EXPECT_NEAR(mapper_->get_parameter("miss_log_odds").as_double(), -0.50, 1e-6);
   EXPECT_NEAR(mapper_->get_parameter("max_roll_pitch_deg").as_double(),   10.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("max_height_delta_m").as_double(),   0.15, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("max_scan_yaw_change_rad").as_double(), 0.005, 1e-12);

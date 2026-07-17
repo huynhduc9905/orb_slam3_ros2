@@ -79,6 +79,9 @@ private:
   double wheel_max_gap_ms_;
   double resolution_m_;
   double usable_range_m_;
+  double hit_range_max_m_;
+  double hit_log_odds_;
+  double miss_log_odds_;
   double max_roll_pitch_deg_;
   double max_height_delta_m_;
   double max_scan_yaw_change_rad_;

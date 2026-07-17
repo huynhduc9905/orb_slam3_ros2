@@ -202,12 +202,21 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   wheel_max_gap_ms_(declare_parameter("wheel_max_gap_ms", 100.0)),
   resolution_m_(declare_parameter("resolution_m", 0.05)),
   usable_range_m_(declare_parameter("usable_range_m", 20.0)),
+  hit_range_max_m_(declare_parameter("hit_range_max_m", 10.0)),
+  hit_log_odds_(declare_parameter("hit_log_odds", 0.55)),
+  miss_log_odds_(declare_parameter("miss_log_odds", -0.50)),
   max_roll_pitch_deg_(declare_parameter("max_roll_pitch_deg", 10.0)),
   max_height_delta_m_(declare_parameter("max_height_delta_m", 0.15)),
   max_scan_yaw_change_rad_(declare_parameter("max_scan_yaw_change_rad", 0.005)),
   visual_anchor_max_gap_ms_(declare_parameter("visual_anchor_max_gap_ms", 200.0)),
   pending_scan_timeout_s_(declare_parameter("pending_scan_timeout_s", 2.0)),
   pending_scan_limit_(declare_parameter("pending_scan_limit", 200)) {
+
+  if (!std::isfinite(hit_range_max_m_) || !std::isfinite(hit_log_odds_) ||
+      !std::isfinite(miss_log_odds_) || hit_range_max_m_ <= 0.0 ||
+      hit_range_max_m_ > usable_range_m_) {
+    throw std::invalid_argument("hit range and log-odds parameters are invalid");
+  }
 
   if (!std::isfinite(max_scan_yaw_change_rad_) ||
       !std::isfinite(visual_anchor_max_gap_ms_) ||
@@ -235,6 +244,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   GridConfig grid_cfg;
   grid_cfg.resolution_m  = resolution_m_;
   grid_cfg.usable_range_m = usable_range_m_;
+  grid_cfg.hit_range_max_m = hit_range_max_m_;
+  grid_cfg.hit_log_odds = static_cast<float>(hit_log_odds_);
+  grid_cfg.miss_log_odds = static_cast<float>(miss_log_odds_);
 
   rebuilder_ = std::make_unique<MapRebuilder>(
       grid_cfg,
