@@ -68,4 +68,8 @@ StereoCalibRun estimateFromPlanarPoses(
 // Throws on bag/ORB init failure or operational tracking-gate failure.
 StereoCalibRun runStereoCalibration(const StereoCalibConfig& config);
 
+// Operational tracking gates (throw on failure). Exposed for unit tests.
+void assertTrackingGates(std::size_t tracked_ok, std::size_t tracked_total,
+                         const StereoCalibConfig& config);
+
 }  // namespace orb_slam3_wrapper

@@ -136,6 +136,26 @@ StereoCalibRun estimateFromPlanarPoses(
   return run;
 }
 
+void assertTrackingGates(std::size_t tracked_ok, std::size_t tracked_total,
+                         const StereoCalibConfig& config) {
+  if (tracked_ok < config.min_tracked_frames) {
+    throw std::runtime_error(
+        "ORB tracking gate failed: tracked_ok=" + std::to_string(tracked_ok) +
+        " < min_tracked_frames=" + std::to_string(config.min_tracked_frames));
+  }
+  const double loss_fraction =
+      tracked_total == 0
+          ? 1.0
+          : 1.0 - static_cast<double>(tracked_ok) /
+                     static_cast<double>(tracked_total);
+  if (loss_fraction > config.max_tracking_loss_fraction) {
+    throw std::runtime_error(
+        "ORB tracking gate failed: loss_fraction=" +
+        std::to_string(loss_fraction) + " > max_tracking_loss_fraction=" +
+        std::to_string(config.max_tracking_loss_fraction));
+  }
+}
+
 StereoCalibRun runStereoCalibration(const StereoCalibConfig& config) {
   validateConfig(config);
 
@@ -197,24 +217,7 @@ StereoCalibRun runStereoCalibration(const StereoCalibConfig& config) {
     run.trajectory.push_back(std::move(tracked));
   }
 
-  // Tracking gates: operational failure → throw.
-  if (run.tracked_ok < config.min_tracked_frames) {
-    throw std::runtime_error(
-        "ORB tracking gate failed: tracked_ok=" +
-        std::to_string(run.tracked_ok) + " < min_tracked_frames=" +
-        std::to_string(config.min_tracked_frames));
-  }
-  const double loss_fraction =
-      run.tracked_total == 0
-          ? 1.0
-          : 1.0 - static_cast<double>(run.tracked_ok) /
-                     static_cast<double>(run.tracked_total);
-  if (loss_fraction > config.max_tracking_loss_fraction) {
-    throw std::runtime_error(
-        "ORB tracking gate failed: loss_fraction=" +
-        std::to_string(loss_fraction) + " > max_tracking_loss_fraction=" +
-        std::to_string(config.max_tracking_loss_fraction));
-  }
+  assertTrackingGates(run.tracked_ok, run.tracked_total, config);
 
   reportStage(70, "pairs");
   run.samples = buildSamples(run.planar, run.dataset.recorded_mount,
