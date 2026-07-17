@@ -294,15 +294,17 @@ StereoDataset StereoBagReader::read(const std::filesystem::path& bag_path) {
       mount.T_base_camera_link.translation().y(),
   };
   data.odom_se2 = std::move(odom_se2);
+  // Canonical RealSense optical frames. Do not trust camera_info.header.frame_id
+  // for the right camera: some bags (right_camera_info_frame_is_wrong) stamp both
+  // infos with the left optical frame, which breaks Calibration::fromCameraInfo.
   data.left_optical_frame = kLeftOpticalFrame;
   data.right_optical_frame = kRightOpticalFrame;
-
-  // Prefer frame_id from camera_info / images when present.
-  if (!data.left_info.header.frame_id.empty()) {
+  if (!data.left_info.header.frame_id.empty() &&
+      data.left_info.header.frame_id != data.right_info.header.frame_id) {
     data.left_optical_frame = data.left_info.header.frame_id;
-  }
-  if (!data.right_info.header.frame_id.empty()) {
-    data.right_optical_frame = data.right_info.header.frame_id;
+    if (!data.right_info.header.frame_id.empty()) {
+      data.right_optical_frame = data.right_info.header.frame_id;
+    }
   }
 
   data.frames.reserve(pairs.size());
