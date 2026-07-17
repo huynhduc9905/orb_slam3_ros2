@@ -26,6 +26,16 @@ target_include_directories(orb_slam3_wrapper_core PUBLIC
 ament_target_dependencies(orb_slam3_wrapper_core sensor_msgs orb_slam3_msgs rclcpp cv_bridge diagnostic_msgs geometry_msgs nav_msgs tf2 tf2_ros visualization_msgs std_msgs ament_index_cpp message_filters)
 target_link_libraries(orb_slam3_wrapper_core ORB_SLAM3::ORB_SLAM3 Eigen3::Eigen)
 
+add_library(orb_slam3_wrapper_stereo_calib
+  src/stereo_rotation_center.cpp)
+target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(orb_slam3_wrapper_stereo_calib PUBLIC Eigen3::Eigen)
+
+ament_add_gtest(stereo_rotation_center_test test/stereo_rotation_center_test.cpp)
+target_link_libraries(stereo_rotation_center_test orb_slam3_wrapper_stereo_calib)
+
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
 ament_target_dependencies(calibration_test sensor_msgs)
