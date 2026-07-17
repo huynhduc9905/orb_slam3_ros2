@@ -178,9 +178,41 @@ uses `usable_range_m` for normal rays (beyond-hit-cap finite hits clear only to
 the hit cap). Diagnostics on `/diagnostics` include `hits_applied` and
 `hits_range_skipped`.
 
-**Note:** the thickness fix is occupancy-first. IMU deskew is not yet
-implemented (P2+). Design:
+### Live IMU deskew (P2)
+
+Handsfree ~200 Hz `/imu` is fused into **live** scan deskew only (relative
+motion inside a sweep). ORB remains the sole global pose authority; no
+pose-moving ICP.
+
+```text
+imu_topic = /imu
+enable_imu_deskew = true
+imu_retention_s = 300.0     # match wheel_retention_s
+imu_max_gap_ms = 20.0       # full-sweep coverage required for fusion
+```
+
+Fusion rule when IMU covers the full sweep: wheel **xy** + IMU-integrated
+**Δyaw** from scan start to each ray stamp; bracketed residual^α still
+uses ORB start/end anchors. If coverage fails (gap > 20 ms or missing
+samples), deskew **falls back to wheel-only** and increments
+`imu_deskew_fallbacks` — the scan is not rejected for IMU alone.
+
+Diagnostics on `/diagnostics` also include `imu_samples`,
+`imu_deskew_fallbacks`, and `enable_imu_deskew` (0/1).
+
+Archive/rebuild still stores per-ray **wheel** poses this phase (P3 would
+archive IMU for rebuild). Plan:
+`docs/superpowers/plans/2026-07-17-orb-lidar-imu-deskew-p2.md`. Design:
 `docs/superpowers/specs/2026-07-17-orb-lidar-thin-walls-follow-orb-design.md`.
+
+**Bag replay (P2):** `forward-and-back-origin` via
+`tools/run_full_stack_dashboard.sh` (domain 94, rate 2.0) wrote
+`tools/full-stack-report/forward-and-back-origin-imu-deskew/` (gitignored).
+End-of-run diagnostics: `imu_samples≈16842`, `imu_deskew_fallbacks≈679`,
+`enable_imu_deskew=1`, `scans_committed≈893`, map free/occupied
+≈79183/4624. Loop-closure gate still fails on this bag (0 loops; expected
+for short out-and-back). Compare wall thickness on the dashboard/map PNGs
+vs pre-IMU runs.
 
 ## Validation Completed
 
