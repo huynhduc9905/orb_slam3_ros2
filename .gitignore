@@ -9,6 +9,7 @@ semantic-review/
 docs/superpowers/plans/2026-07-17-icp-aligned-map-view.md
 # Generated calibration outputs (sample HTML lives under docs/samples/)
 tools/lidar-rotation-center-report/
+tools/stereo-rotation-center-report/
 *.osa
 ORBvoc.txt
 __pycache__/
