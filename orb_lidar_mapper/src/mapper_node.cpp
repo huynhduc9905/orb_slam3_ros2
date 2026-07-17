@@ -191,6 +191,7 @@ void notifyDestructorEntry() {
 MapperNode::MapperNode(const rclcpp::NodeOptions& options)
 : Node("orb_lidar_mapper", options),
   odom_topic_(declare_parameter("odom_topic", "/odom_wheel")),
+  imu_topic_(declare_parameter("imu_topic", "/imu")),
   scan_topic_(declare_parameter("scan_topic", "/scan_origin")),
   tracked_frame_topic_(declare_parameter("tracked_frame_topic", "/orb_slam3/tracked_frame")),
   graph_snapshot_topic_(declare_parameter("graph_snapshot_topic", "/orb_slam3/graph_snapshot")),
@@ -200,6 +201,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   base_frame_(declare_parameter("base_frame", "base_link")),
   wheel_retention_s_(declare_parameter("wheel_retention_s", 300.0)),
   wheel_max_gap_ms_(declare_parameter("wheel_max_gap_ms", 100.0)),
+  enable_imu_deskew_(declare_parameter("enable_imu_deskew", true)),
+  imu_retention_s_(declare_parameter("imu_retention_s", 300.0)),
+  imu_max_gap_ms_(declare_parameter("imu_max_gap_ms", 20.0)),
   resolution_m_(declare_parameter("resolution_m", 0.05)),
   usable_range_m_(declare_parameter("usable_range_m", 20.0)),
   hit_range_max_m_(declare_parameter("hit_range_max_m", 10.0)),
@@ -239,6 +243,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   traj_ = std::make_unique<TrajectoryStore>(TrajectoryConfig{retention_ns, max_gap_ns});
   // Mirror wheel buffer used for deskewing — same parameters as TrajectoryStore's internal buffer.
   wheel_buf_ = std::make_unique<TimedPoseBuffer>(retention_ns, max_gap_ns);
+  const int64_t imu_retention_ns = static_cast<int64_t>(imu_retention_s_ * 1e9);
+  const int64_t imu_max_gap_ns = static_cast<int64_t>(imu_max_gap_ms_ * 1e6);
+  imu_buf_ = std::make_unique<ImuYawBuffer>(imu_retention_ns, imu_max_gap_ns);
   archive_ = std::make_shared<ScanArchive>();
 
   GridConfig grid_cfg;
@@ -282,6 +289,10 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, sensor_qos,
       [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) { onOdom(msg); });
+
+  imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+      imu_topic_, sensor_qos,
+      [this](sensor_msgs::msg::Imu::ConstSharedPtr msg) { onImu(msg); });
 
   scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
       scan_topic_, sensor_qos,
@@ -333,6 +344,22 @@ void MapperNode::onOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg) {
   path.poses = wheel_poses_;
   wheel_path_pub_->publish(path);
 
+  processPendingScansLocked();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IMU
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MapperNode::onImu(sensor_msgs::msg::Imu::ConstSharedPtr msg) {
+  const int64_t stamp_ns = toNs(msg->header.stamp);
+  const TimedYawRate sample{stamp_ns, msg->angular_velocity.z};
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!imu_buf_ || !imu_buf_->push(sample)) {
+    return;
+  }
+  ++imu_samples_;
   processPendingScansLocked();
 }
 
@@ -596,11 +623,20 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
   std::vector<Ray2> local_rays;
   std::optional<ArchivedBracketedMotion> archived_motion;
 
+  const ImuYawBuffer* imu_ptr =
+    (enable_imu_deskew_ && imu_buf_) ? imu_buf_.get() : nullptr;
+  auto countImuFallbackIfNeeded = [&]() {
+    if (imu_ptr && !imu_buf_->covers(pending.start_ns, pending.end_ns)) {
+      ++imu_deskew_fallbacks_;
+    }
+  };
+
   if (loss_scan) {
     // LOST intervals keep the established wheel-only provisional geometry;
     // timestamp-based membership survives callback reordering and recovery.
+    countImuFallbackIfNeeded();
     auto rays = ScanDeskewer::deskew(
-      scan, Pose2{}, pending.base_to_lidar, *wheel_buf_);
+      scan, Pose2{}, pending.base_to_lidar, *wheel_buf_, imu_ptr);
     if (!rays || rays->empty()) {
       return PendingScanResult::kDropped;
     }
@@ -616,8 +652,9 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
         bracket->start_stamp_ns, bracket->end_stamp_ns,
         bracket->start_map_pose, bracket->end_map_pose,
         bracket->start_wheel_pose, bracket->end_wheel_pose};
+      countImuFallbackIfNeeded();
       auto deskewed = ScanDeskewer::deskewBracketed(
-        scan, pending.base_to_lidar, *wheel_buf_, motion_bracket);
+        scan, pending.base_to_lidar, *wheel_buf_, motion_bracket, imu_ptr);
       if (!deskewed || deskewed->rays.empty()) {
         return PendingScanResult::kDropped;
       }
@@ -835,6 +872,9 @@ void MapperNode::publishDiagnostics(const std::string& level, const std::string&
   add_kv("scans_provisional", scans_provisional_.load());
   add_kv("scans_turn_rejected", scans_turn_rejected_.load());
   add_kv("scans_timeout_dropped", scans_timeout_dropped_.load());
+  add_kv("imu_samples", imu_samples_.load());
+  add_kv("imu_deskew_fallbacks", imu_deskew_fallbacks_.load());
+  add_kv("enable_imu_deskew", enable_imu_deskew_ ? 1ULL : 0ULL);
   if (rebuilder_) {
     const InsertStats insert_stats = rebuilder_->cumulativeInsertStats();
     add_kv("hits_applied", insert_stats.hits_applied);

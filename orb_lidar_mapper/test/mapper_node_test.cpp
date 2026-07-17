@@ -1030,6 +1030,10 @@ TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   EXPECT_EQ(mapper_->get_parameter("base_frame").as_string(),    "base_link");
   EXPECT_NEAR(mapper_->get_parameter("wheel_retention_s").as_double(),  300.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
+  EXPECT_EQ(mapper_->get_parameter("imu_topic").as_string(), "/imu");
+  EXPECT_TRUE(mapper_->get_parameter("enable_imu_deskew").as_bool());
+  EXPECT_NEAR(mapper_->get_parameter("imu_retention_s").as_double(), 300.0, 1e-9);
+  EXPECT_NEAR(mapper_->get_parameter("imu_max_gap_ms").as_double(), 20.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       20.0, 1e-9);
   EXPECT_NEAR(mapper_->get_parameter("hit_range_max_m").as_double(), 10.0, 1e-9);
