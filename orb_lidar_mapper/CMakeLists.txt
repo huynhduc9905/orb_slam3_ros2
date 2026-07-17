@@ -22,6 +22,7 @@ find_package(PCL 1.15 REQUIRED COMPONENTS common registration kdtree filters)
 add_library(${PROJECT_NAME}_core
   src/pose2.cpp
   src/timed_pose_buffer.cpp
+  src/imu_yaw_buffer.cpp
   src/trajectory_store.cpp
   src/scan_deskewer.cpp
   src/tiled_occupancy_grid.cpp
@@ -90,6 +91,10 @@ if(BUILD_TESTING)
   ament_add_gtest(timed_pose_buffer_test test/timed_pose_buffer_test.cpp)
   target_include_directories(timed_pose_buffer_test PRIVATE include)
   target_link_libraries(timed_pose_buffer_test ${PROJECT_NAME}_core)
+
+  ament_add_gtest(imu_yaw_buffer_test test/imu_yaw_buffer_test.cpp)
+  target_include_directories(imu_yaw_buffer_test PRIVATE include)
+  target_link_libraries(imu_yaw_buffer_test ${PROJECT_NAME}_core)
 
   ament_add_gtest(trajectory_store_test test/trajectory_store_test.cpp)
   target_include_directories(trajectory_store_test PRIVATE include)
