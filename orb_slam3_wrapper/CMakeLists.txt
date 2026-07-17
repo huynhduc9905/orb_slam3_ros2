@@ -33,11 +33,13 @@ add_library(orb_slam3_wrapper_stereo_calib
   src/planar_pose_projector.cpp
   src/mount_xy_mapper.cpp
   src/stereo_calib_analysis.cpp
-  src/stereo_bag_reader.cpp)
+  src/stereo_bag_reader.cpp
+  src/stereo_calib_pipeline.cpp)
 target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(orb_slam3_wrapper_stereo_calib PUBLIC
+  orb_slam3_wrapper_core
   Eigen3::Eigen
   rclcpp::rclcpp
   rosbag2_cpp::rosbag2_cpp
@@ -71,6 +73,9 @@ target_link_libraries(stereo_bag_reader_test
   ${nav_msgs_TARGETS}
   ${tf2_msgs_TARGETS}
   ${geometry_msgs_TARGETS})
+
+ament_add_gtest(stereo_calib_pipeline_test test/stereo_calib_pipeline_test.cpp)
+target_link_libraries(stereo_calib_pipeline_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
