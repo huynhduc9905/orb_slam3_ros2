@@ -13,6 +13,10 @@ find_package(visualization_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(orb_slam3_msgs REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(PCL 1.15 REQUIRED COMPONENTS common registration kdtree filters)
 
 # ── Core library (no ROS) ────────────────────────────────────────────────────
 add_library(${PROJECT_NAME}_core
@@ -39,6 +43,26 @@ ament_target_dependencies(${PROJECT_NAME}_node
   sensor_msgs nav_msgs geometry_msgs visualization_msgs
   diagnostic_msgs std_msgs orb_slam3_msgs)
 
+# ── Offline calibration library ─────────────────────────────────────────────
+add_library(${PROJECT_NAME}_calibration
+  src/rotation_bag_reader.cpp
+  src/calibration_deskew.cpp
+  src/planar_icp.cpp
+  src/rotation_center_estimator.cpp
+  src/calibration_analysis.cpp
+  src/calibration_pipeline.cpp
+  src/calibration_report.cpp)
+target_compile_features(${PROJECT_NAME}_calibration PUBLIC cxx_std_17)
+target_include_directories(${PROJECT_NAME}_calibration PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_include_directories(${PROJECT_NAME}_calibration SYSTEM PUBLIC
+  ${PCL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME}_calibration
+  ${PROJECT_NAME}_core ${PCL_LIBRARIES})
+ament_target_dependencies(${PROJECT_NAME}_calibration
+  rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs pcl_conversions)
+
 # ── Executable ───────────────────────────────────────────────────────────────
 add_executable(${PROJECT_NAME}_node_exe src/main.cpp)
 target_link_libraries(${PROJECT_NAME}_node_exe ${PROJECT_NAME}_node)
@@ -46,6 +70,14 @@ ament_target_dependencies(${PROJECT_NAME}_node_exe rclcpp)
 set_target_properties(${PROJECT_NAME}_node_exe PROPERTIES
   OUTPUT_NAME orb_lidar_mapper_node)
 install(TARGETS ${PROJECT_NAME}_node_exe DESTINATION lib/${PROJECT_NAME})
+
+add_executable(lidar_rotation_center_check src/lidar_rotation_center_check.cpp)
+target_compile_features(lidar_rotation_center_check PUBLIC cxx_std_17)
+target_include_directories(lidar_rotation_center_check PRIVATE include)
+target_link_libraries(lidar_rotation_center_check ${PROJECT_NAME}_calibration)
+ament_target_dependencies(lidar_rotation_center_check
+  rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+install(TARGETS lidar_rotation_center_check DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -80,13 +112,58 @@ if(BUILD_TESTING)
   ament_target_dependencies(mapper_node_test
     rclcpp tf2_ros sensor_msgs nav_msgs geometry_msgs
     visualization_msgs orb_slam3_msgs)
+
+  ament_add_gtest(rotation_bag_reader_test test/rotation_bag_reader_test.cpp)
+  target_include_directories(rotation_bag_reader_test PRIVATE include)
+  target_link_libraries(rotation_bag_reader_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(rotation_bag_reader_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_deskew_test test/calibration_deskew_test.cpp)
+  target_include_directories(calibration_deskew_test PRIVATE include)
+  target_link_libraries(calibration_deskew_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_deskew_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(planar_icp_test test/planar_icp_test.cpp)
+  target_include_directories(planar_icp_test PRIVATE include)
+  target_link_libraries(planar_icp_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(planar_icp_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(rotation_center_estimator_test
+    test/rotation_center_estimator_test.cpp)
+  target_include_directories(rotation_center_estimator_test PRIVATE include)
+  target_link_libraries(rotation_center_estimator_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(rotation_center_estimator_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_analysis_test test/calibration_analysis_test.cpp)
+  target_include_directories(calibration_analysis_test PRIVATE include)
+  target_link_libraries(calibration_analysis_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_analysis_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_pipeline_test test/calibration_pipeline_test.cpp)
+  target_include_directories(calibration_pipeline_test PRIVATE include)
+  target_link_libraries(calibration_pipeline_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_pipeline_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
+
+  ament_add_gtest(calibration_report_test test/calibration_report_test.cpp)
+  target_include_directories(calibration_report_test PRIVATE include)
+  target_link_libraries(calibration_report_test ${PROJECT_NAME}_calibration)
+  ament_target_dependencies(calibration_report_test
+    rclcpp rosbag2_cpp sensor_msgs nav_msgs tf2_msgs)
 endif()
 
 install(TARGETS ${PROJECT_NAME}_core EXPORT ${PROJECT_NAME}_targets)
 install(TARGETS ${PROJECT_NAME}_node EXPORT ${PROJECT_NAME}_targets)
+install(TARGETS ${PROJECT_NAME}_calibration EXPORT ${PROJECT_NAME}_targets)
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(${PROJECT_NAME}_targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp tf2 tf2_ros tf2_geometry_msgs
   sensor_msgs nav_msgs geometry_msgs visualization_msgs
-  diagnostic_msgs std_msgs orb_slam3_msgs)
+  diagnostic_msgs std_msgs orb_slam3_msgs rosbag2_cpp tf2_msgs pcl_conversions)
+ament_export_dependencies(PCL)
 ament_package()

@@ -19,6 +19,10 @@
   <depend>diagnostic_msgs</depend>
   <depend>std_msgs</depend>
   <depend>orb_slam3_msgs</depend>
+  <depend>rosbag2_cpp</depend>
+  <depend>tf2_msgs</depend>
+  <depend>pcl_conversions</depend>
+  <depend>libpcl-all-dev</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>rclcpp</test_depend>

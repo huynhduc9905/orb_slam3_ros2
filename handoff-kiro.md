@@ -20,6 +20,81 @@ The user viewed the custom dashboard during a fresh replay and reported that the
 
 Do **not** redesign this as an IMU integration task. The user explicitly chose this conservative wheel + two-visual-anchor approach. The Handsfree and D435i IMU paths remain out of scope unless separately requested.
 
+## Offline Rotation-Center Calibration Result
+
+An independent, read-only calibration check was run against the immutable
+`/home/duc/robot/bag/inplace-rotate` MCAP (91.353939991 seconds; 915
+`/scan_origin`, 915 `/scan`, 1,827 `/odom`, and 18,289 `/imu` messages). The
+first fresh attempt at
+`artifacts/inplace-rotate-calibration-20260716` returned operational exit 1
+because `/imu` contains contiguous duplicate header timestamps; that failed
+output path was not reused. Approved commits `21f0a9f` and
+`b4849a1` changed only the reader and its tests so equal contiguous IMU stamps
+are combined by a finite-checked `long double` arithmetic mean, while strictly
+decreasing stamps still fail. The retry dataset therefore contains 8,569
+unique IMU timestamp groups.
+
+The outputs in `artifacts/inplace-rotate-calibration-20260716-retry1` and
+`retry2` remain preserved but are scientifically stale. Both were generated
+before `7794e53` corrected the source-to-target yaw convention; retry2 changed
+only the mobile report layout. Their zero accepted-pair result must not be used
+for calibration decisions. After rebuilding approved commit `7794e53`, exactly
+one additional immutable-bag run was made into a new path:
+
+```bash
+source install/setup.bash
+ros2 run orb_lidar_mapper lidar_rotation_center_check \
+  --bag /home/duc/robot/bag/inplace-rotate \
+  --output "$PWD/artifacts/inplace-rotate-calibration-20260716-retry3"
+```
+
+No threshold options were supplied or tuned after seeing the output. All
+predeclared gates stayed unchanged: angular speed 0.15–0.45 rad/s, linear
+speed at most 0.02 m/s, pair separation 10–30 degrees, overlap at least 0.40,
+ICP RMSE at most 0.05 m, ICP/odom yaw error at most 2 degrees, and the existing
+reliability, plausibility, consensus, and sharpness gates.
+
+The tool returned accepted scientific exit 3, `INCONCLUSIVE`, with aggregate
+reason `sharpness_non_unique`. The recorded center is
+`(0.260, 0.000) m`. Every raw method field and rejection counter is:
+
+| Method | Center x/y (m) | Forward/delta (m) | 95% CI x (m) | Pairs | Sectors | RMSE/overlap | Rejections |
+|---|---|---|---|---:|---:|---|---|
+| Odom | 0.2379652303 / -0.0061142640 | 0.2379652303 / -0.0220347697 | [0.2352081836, 0.2386867630] | 171/512 | 8 | 0.0082904437 / 0.7445378151 | yaw disagreement 200; insufficient overlap 110; implausible center 29; trimmed RMSE 2 |
+| IMU | 0.2375527669 / -0.0040162076 | 0.2375527669 / -0.0224472331 | [0.2350004394, 0.2386822376] | 172/512 | 8 | 0.0083020599 / 0.7443506196 | yaw disagreement 198; insufficient overlap 112; implausible center 28; trimmed RMSE 2 |
+| Existing `/scan` | 0.2476510983 / 0.0013325828 | 0.2476510983 / -0.0123489017 | [0.2461113510, 0.2500656229] | 172/512 | 8 | 0.0094094900 / 0.7543158596 | yaw disagreement 172; insufficient overlap 134; implausible center 34 |
+
+All three methods are reliable. The raw consensus is 0.24063816538065377 m
+with 95% CI [0.23855052962519216, 0.2427258011361154] m. The replacement
+temporal sharpness sweep is unreliable: its raw minimum is
+0.22200000000000003 m with score 0.337169975947602 and rejection reason
+`sharpness_non_unique`. This keeps the aggregate classification inconclusive.
+
+Relative to stale retry2, yaw-disagreement rejections fell from 301 to 200,
+302 to 198, and 281 to 172 for Odom, IMU, and Existing `/scan`. This expected
+change follows from correcting the sign of the expected lidar
+source-to-target yaw. Because yaw is checked before overlap, RMSE, and center
+plausibility, valid pairs now reach those later gates and 171/172/172 pairs are
+accepted. No threshold was changed.
+
+All four files (`calibration.json`, `centers.csv`, `sharpness.csv`, and
+`report.html`) are nonempty in the retry3 artifact. The exact retry3 report was
+checked at 1440x900, 768x1024, and 390x844 with numeric JSON agreement,
+method/legend colors, signs, warning, map framing, and responsive containment;
+there were no browser errors or post-load network requests. At 390x844, every
+one of the ten labels and exact values for each of the three methods is visible
+and contained in its stacked row, with no table or document horizontal
+overflow. Full screenshots were inspected. They show one scientific
+presentation limitation: all 1,021 rejected centers lie outside the fixed
+scatter canvas, so no red rejected outlines are visible. These do not upgrade
+the scientific result.
+
+No offset recommendation is made because the aggregate is inconclusive. No
+TF, URDF, source configuration, or bag data changed. The remaining review
+Minor is that pair selection still does not inspect interpolated endpoint
+twists for per-pair linear-speed gating; addressing it requires a separate
+API/data-flow change.
+
 ## Current Mapper Behavior
 
 ### Accepted normal scans
@@ -131,8 +206,9 @@ A fresh hardening replay used a clean ROS domain and wrote artifacts to:
 /home/duc/robot/src/orb_slam3_ros2/artifacts/direct-dashboard-hardening-run-20260716
 ```
 
-After the shutdown regression fix, the full suite was 321 tests with zero errors,
-failures, or skips, and all 11 checker gates passed. Stereo pairing was
+Current full-suite verification is 383 tests with zero errors, failures, or
+skips. At the earlier shutdown-regression replay milestone, all 11 checker
+gates passed. Stereo pairing was
 6633/6633 (ratio 1.0); tracking initialized with OK ratio 1.0, loop count 1,
 zero invalid poses, and no deadlock. The final map was 512x448 at
 0.05000000074505806 m resolution, with 80744 free and 5830 occupied cells.
