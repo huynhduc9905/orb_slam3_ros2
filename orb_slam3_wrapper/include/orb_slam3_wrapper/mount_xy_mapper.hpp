@@ -18,10 +18,7 @@ struct StaticCameraMount {
 // center, expressed in the horizontal left-camera frame (same as centerFromTransform).
 // For pure spin about base origin, in base horizontal frame the optical origin is at
 // p_base, and c_base = -p_base_xy (center at origin). Convert frames carefully.
-struct MountXy {
-  double x_m{};
-  double y_m{};
-};
+// MountXy is defined in stereo_calib_types.hpp.
 
 // Given estimated c in horizontal-left frame and fixed mount orientations,
 // return implied base_link→camera_link translation xy (z kept from recorded).

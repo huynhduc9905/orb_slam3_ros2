@@ -29,7 +29,8 @@ target_link_libraries(orb_slam3_wrapper_core ORB_SLAM3::ORB_SLAM3 Eigen3::Eigen)
 add_library(orb_slam3_wrapper_stereo_calib
   src/stereo_rotation_center.cpp
   src/planar_pose_projector.cpp
-  src/mount_xy_mapper.cpp)
+  src/mount_xy_mapper.cpp
+  src/stereo_calib_analysis.cpp)
 target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -43,6 +44,9 @@ target_link_libraries(planar_pose_projector_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(mount_xy_mapper_test test/mount_xy_mapper_test.cpp)
 target_link_libraries(mount_xy_mapper_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_calib_analysis_test test/stereo_calib_analysis_test.cpp)
+target_link_libraries(stereo_calib_analysis_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
