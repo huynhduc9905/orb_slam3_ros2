@@ -135,6 +135,9 @@ class Recorder {
 TEST(MapRebuilder, IncrementalAppendPublishesImmutableSnapshot) {
   Recorder recorder;
   GridConfig config; config.resolution_m = 1.0;
+  config.hit_log_odds = 0.85F;  // single hit must exceed occupied_threshold
+  config.hit_range_max_m = 100.0;
+  config.usable_range_m = 100.0;
   MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
 
   rebuilder.appendCommitted(scan(1), pose(1, 4.0), 7);
@@ -679,6 +682,9 @@ TEST(MapRebuilder, SuccessfulIncrementalCommitClearsReconciliationEntriesForItsS
 TEST(MapRebuilder, FullCorrectionAtIncrementalRevisionPublishes) {
   Recorder recorder;
   GridConfig config; config.resolution_m = 1.0;
+  config.hit_log_odds = 0.85F;  // single hit must exceed occupied_threshold
+  config.hit_range_max_m = 100.0;
+  config.usable_range_m = 100.0;
   MapRebuilder rebuilder(config, [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); });
 
   rebuilder.appendCommitted(scan(1), pose(1), 4);
