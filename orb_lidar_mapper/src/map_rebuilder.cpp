@@ -219,6 +219,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
             active_full->generation != request.generation ||
             request.trajectory->graph_revision < committed_graph_revision) return;
         grid = std::move(candidate_grid);
+        insert_stats_ = grid->cumulativeInsertStats();
         committed_scan_count = committed;
         committed_graph_revision = request.trajectory->graph_revision;
         applied_scan_ids = std::move(applied);
@@ -322,6 +323,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
           return;
         } else {
           grid = std::move(candidate_grid);
+          insert_stats_ = grid->cumulativeInsertStats();
           committed_scan_count += batch.size();
           for (const Incremental& item : batch) {
             committed_graph_revision = std::max(committed_graph_revision, item.graph_revision);
@@ -435,6 +437,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
   mutable std::mutex mutex;
   std::condition_variable cv;
   std::unique_ptr<TiledOccupancyGrid> grid;
+  InsertStats insert_stats_{};
   std::thread worker;
   std::deque<Incremental> incrementals;
   std::deque<Failure> failures;
@@ -515,6 +518,13 @@ std::shared_ptr<const MapSnapshot> MapRebuilder::current() const {
   if (!state) return nullptr;
   std::lock_guard<std::mutex> lock(state->mutex);
   return state->current_snapshot;
+}
+
+InsertStats MapRebuilder::cumulativeInsertStats() const {
+  const auto state = impl_;
+  if (!state) return {};
+  std::lock_guard<std::mutex> lock(state->mutex);
+  return state->insert_stats_;
 }
 
 MapRebuilderTestState MapRebuilder::testState() const {

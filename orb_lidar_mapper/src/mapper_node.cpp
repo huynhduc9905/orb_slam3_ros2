@@ -835,6 +835,11 @@ void MapperNode::publishDiagnostics(const std::string& level, const std::string&
   add_kv("scans_provisional", scans_provisional_.load());
   add_kv("scans_turn_rejected", scans_turn_rejected_.load());
   add_kv("scans_timeout_dropped", scans_timeout_dropped_.load());
+  if (rebuilder_) {
+    const InsertStats insert_stats = rebuilder_->cumulativeInsertStats();
+    add_kv("hits_applied", insert_stats.hits_applied);
+    add_kv("hits_range_skipped", insert_stats.hits_range_skipped);
+  }
 
   array.status.push_back(status);
   diagnostics_pub_->publish(array);

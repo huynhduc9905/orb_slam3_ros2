@@ -25,6 +25,7 @@ add_library(${PROJECT_NAME}_core
   src/trajectory_store.cpp
   src/scan_deskewer.cpp
   src/tiled_occupancy_grid.cpp
+  src/wall_thickness.cpp
   src/map_rebuilder.cpp)
 target_compile_features(${PROJECT_NAME}_core PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME}_core PUBLIC
@@ -101,6 +102,10 @@ if(BUILD_TESTING)
   ament_add_gtest(tiled_occupancy_grid_test test/tiled_occupancy_grid_test.cpp)
   target_include_directories(tiled_occupancy_grid_test PRIVATE include)
   target_link_libraries(tiled_occupancy_grid_test ${PROJECT_NAME}_core)
+
+  ament_add_gtest(wall_thickness_test test/wall_thickness_test.cpp)
+  target_include_directories(wall_thickness_test PRIVATE include)
+  target_link_libraries(wall_thickness_test ${PROJECT_NAME}_core)
 
   ament_add_gtest(map_rebuilder_test test/map_rebuilder_test.cpp)
   target_include_directories(map_rebuilder_test PRIVATE include)
