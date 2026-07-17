@@ -160,24 +160,16 @@ def _setup(context, *args, **kwargs):
     ]
 
     recorded_pairs = _inspect_bag_static_pairs(bag_path)
-    # Fail early if supplemental would duplicate recorded parent/child pairs.
     recorded_set = set(recorded_pairs)
-    for parent, child in supplemental_pairs:
-        if (parent, child) in recorded_set:
-            raise RuntimeError(
-                f"Supplemental TF {parent}->{child} would duplicate a recorded "
-                f"/tf_static edge; refusing to start publishers."
-            )
-    # Confirm only the two configured mount edges are the ones we must add
-    # among the required mount set (base_link->camera_link, base_link->base_scan).
+    # Publish profile supplemental mounts only when the bag is missing them.
+    # Newer bags (e.g. forward-and-back-origin) already record
+    # base_link→camera_link and base_link→base_scan; older 20260713 bags do not.
     missing_mounts = [
         pair for pair in supplemental_pairs if pair not in recorded_set
     ]
-    if set(missing_mounts) != set(supplemental_pairs):
-        raise RuntimeError(
-            f"Expected both mount edges absent from bag; missing={missing_mounts} "
-            f"configured={supplemental_pairs}"
-        )
+    present_mounts = [
+        pair for pair in supplemental_pairs if pair in recorded_set
+    ]
 
     os.makedirs(artifact_dir, exist_ok=True)
 
@@ -187,27 +179,37 @@ def _setup(context, *args, **kwargs):
     if ros_domain_id:
         actions.append(SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id))
 
-    # Supplemental static mounts (authoritative recorded edges stay from bag).
+    if present_mounts:
+        actions.append(
+            LogInfo(
+                msg=(
+                    "[bag_replay] using bag /tf_static for mounts: "
+                    + ", ".join(f"{p}->{c}" for p, c in present_mounts)
+                )
+            )
+        )
+
+    # Supplemental static mounts for edges absent from the bag only.
     cam = supplemental["camera_link"]
     scan = supplemental["base_scan"]
-    actions.append(
-        _static_transform_node(
+    mount_specs = {
+        (cam["parent"], cam["child"]): (
             "supplemental_tf_camera_link",
-            cam["parent"],
-            cam["child"],
             cam["xyz"],
             cam["rpy"],
-        )
-    )
-    actions.append(
-        _static_transform_node(
+        ),
+        (scan["parent"], scan["child"]): (
             "supplemental_tf_base_scan",
-            scan["parent"],
-            scan["child"],
             scan["xyz"],
             scan["rpy"],
+        ),
+    }
+    for parent, child in missing_mounts:
+        name, xyz, rpy = mount_specs[(parent, child)]
+        actions.append(
+            LogInfo(msg=f"[bag_replay] publishing supplemental TF {parent}->{child}")
         )
-    )
+        actions.append(_static_transform_node(name, parent, child, xyz, rpy))
 
     # Replay-only odom -> base_link TF (default true for bag replay).
     if publish_odom_tf in ("true", "1", "yes"):
@@ -242,7 +244,7 @@ def _setup(context, *args, **kwargs):
                         [[p, c] for p, c in recorded_pairs]
                     ),
                     "supplemental_pairs": json.dumps(
-                        [[p, c] for p, c in supplemental_pairs]
+                        [[p, c] for p, c in missing_mounts]
                     ),
                 }
             ],
@@ -311,7 +313,11 @@ def _setup(context, *args, **kwargs):
                     "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
                     "config_path": str(profile_path),
                     "repo_dir": str(Path(__file__).resolve().parents[2]),
-                    "expected_stereo_pairs": 6633,
+                    # Soft expected count for report gates; bag-specific.
+                    # 0 disables strict expected-pairs matching (recorder still counts).
+                    "expected_stereo_pairs": int(
+                        profile.get("bag", {}).get("expected_stereo_pairs", 0)
+                    ),
                 }
             ],
             output="screen",

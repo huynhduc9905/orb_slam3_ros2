@@ -68,6 +68,8 @@ After the bag ends, launch shuts down, metrics flush, and (unless disabled)
 Examples:
   $(basename "$0")
   $(basename "$0") --bag /home/duc/robot/bag/20260713_152907
+  # Forward/back bag with Handsfree 200 Hz /imu (already in bag; mapper does not use it yet):
+  $(basename "$0") --bag /home/duc/robot/bag/forward-and-back-origin --domain 91
   $(basename "$0") --rate 2.0 --domain 91 --dashboard-host 0.0.0.0
   $(basename "$0") --no-dashboard --output ${REPORT_ROOT}/ci-run
   $(basename "$0") --open   # open dashboard URL if xdg-open exists
