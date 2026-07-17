@@ -193,8 +193,11 @@ imu_max_gap_ms = 20.0       # full-sweep coverage required for fusion
 
 Fusion rule when IMU covers the full sweep: wheel **xy** + IMU-integrated
 **Δyaw** from scan start to each ray stamp; bracketed residual^α still
-uses ORB start/end anchors. If coverage fails (gap > 20 ms or missing
-samples), deskew **falls back to wheel-only** and increments
+uses ORB start/end anchors (residual end uses fused motion so α=1 lands
+on ORB `end_map`). Mapper waits for IMU coverage up to
+`pending_scan_timeout` when IMU samples have been seen; otherwise falls
+back. If coverage fails (gap > 20 ms or missing samples after timeout),
+deskew **falls back to wheel-only** and increments
 `imu_deskew_fallbacks` — the scan is not rejected for IMU alone.
 
 Diagnostics on `/diagnostics` also include `imu_samples`,

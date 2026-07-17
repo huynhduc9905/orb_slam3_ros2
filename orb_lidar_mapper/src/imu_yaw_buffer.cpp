@@ -120,6 +120,10 @@ std::optional<double> ImuYawBuffer::integratedYaw(std::int64_t start_ns,
   return yaw;
 }
 
+std::optional<std::int64_t> ImuYawBuffer::newestStamp() const noexcept {
+  return samples_.empty() ? std::nullopt : std::optional<std::int64_t>(samples_.back().stamp_ns);
+}
+
 std::size_t ImuYawBuffer::size() const noexcept {
   return samples_.size();
 }

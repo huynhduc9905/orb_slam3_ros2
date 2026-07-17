@@ -28,6 +28,9 @@ class ImuYawBuffer {
   std::optional<double> integratedYaw(std::int64_t start_ns,
                                       std::int64_t target_ns) const;
 
+  // Stamp of the newest sample, if any (for mapper wait-vs-fallback decisions).
+  std::optional<std::int64_t> newestStamp() const noexcept;
+
   std::size_t size() const noexcept;
 
  private:

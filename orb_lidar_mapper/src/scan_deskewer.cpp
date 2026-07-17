@@ -207,21 +207,34 @@ std::optional<BracketedDeskewResult> ScanDeskewer::deskewBracketed(
     return std::nullopt;
   }
 
-  const auto reference_wheel = wheels.interpolate(scan.stamp_ns);
-  if (!reference_wheel) {
-    return std::nullopt;
-  }
-  // Reference uses true wheel at scan start (dyaw=0 when fusing).
-  const auto reference = bracketedBasePose(bracket, *reference_wheel, scan.stamp_ns);
-  if (!reference) {
-    return std::nullopt;
-  }
   const auto time_increment = bracketedTimeIncrement(scan);
   if (!time_increment) {
     return std::nullopt;
   }
 
   const bool use_imu = imuCoversFullSweep(imu, scan, *time_increment);
+  // residual^α is predicted_end^{-1} * end_map. When fusing IMU yaw into ray
+  // motion, predicted_end must use the same fused end motion so α=1 lands on
+  // ORB end_map even if IMU yaw ≠ wheel yaw.
+  ScanMotionBracket effective = bracket;
+  if (use_imu) {
+    const auto fused_end =
+      fuseWheelXyImuYaw(wheels, *imu, scan.stamp_ns, bracket.end_stamp_ns);
+    if (!fused_end) {
+      return std::nullopt;
+    }
+    effective.end_wheel_pose = *fused_end;
+  }
+
+  const auto reference_wheel = wheels.interpolate(scan.stamp_ns);
+  if (!reference_wheel) {
+    return std::nullopt;
+  }
+  // Reference uses true wheel at scan start (dyaw=0 when fusing).
+  const auto reference = bracketedBasePose(effective, *reference_wheel, scan.stamp_ns);
+  if (!reference) {
+    return std::nullopt;
+  }
 
   BracketedDeskewResult result;
   result.rays.reserve(scan.ranges.size());
@@ -261,7 +274,7 @@ std::optional<BracketedDeskewResult> ScanDeskewer::deskewBracketed(
       motion_pose = *fused;
     }
 
-    const auto ray_base = bracketedBasePose(bracket, motion_pose, *stamp_ns);
+    const auto ray_base = bracketedBasePose(effective, motion_pose, *stamp_ns);
     if (!ray_base) {
       return std::nullopt;
     }

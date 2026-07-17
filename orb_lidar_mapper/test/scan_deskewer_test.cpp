@@ -356,13 +356,16 @@ TEST(ScanDeskewer, FallsBackToWheelOnlyWhenImuDoesNotCoverSweep) {
 }
 
 TEST(ScanDeskewer, BracketedFusesImuYawAndArchivesTrueWheelPose) {
-  // Zero residual bracket + stationary wheels: fused IMU yaw alone drives ray
-  // rotation. Archive ray_motions.wheel_pose must keep the true wheel sample.
+  // Stationary wheels; ORB end_map yaw matches fused IMU end so residual is
+  // identity and pure IMU Δyaw drives ray rotation. Archive must still store
+  // true wheel poses (identity), not fused motion.
   const ScanValue scan = threeRayScan(0, 0.05F);
-  const ScanMotionBracket bracket = stationaryBracketForSweep();
+  constexpr double omega = 1.0;  // rad/s
+  constexpr double dyaw_end = 0.1;  // ω * 0.1 s
+  const ScanMotionBracket bracket{
+    0, 100'000'000, Pose2{}, Pose2{0.0, 0.0, dyaw_end}, Pose2{}, Pose2{}};
   TimedPoseBuffer wheels = stationaryWheelBufferForSweep();
 
-  constexpr double omega = 1.0;  // rad/s
   ImuYawBuffer imu = constantOmegaImu(100'000'000, omega);
   ASSERT_TRUE(imu.covers(0, 100'000'000));
 
@@ -374,7 +377,6 @@ TEST(ScanDeskewer, BracketedFusesImuYawAndArchivesTrueWheelPose) {
 
   // t=0, 50ms, 100ms → dyaw = 0, 0.05, 0.1; range=2 along +x in lidar frame.
   const double dyaw_mid = 0.05;
-  const double dyaw_end = 0.1;
   EXPECT_NEAR(result->rays[0].end.x, 2.0, 1e-9);
   EXPECT_NEAR(result->rays[0].end.y, 0.0, 1e-9);
   EXPECT_NEAR(result->rays[1].end.x, 2.0 * std::cos(dyaw_mid), 1e-9);
@@ -413,6 +415,34 @@ TEST(ScanDeskewer, BracketedFallsBackToWheelOnlyWhenImuCoverageFails) {
     EXPECT_NEAR(with_partial->rays[i].end.x, wheel_only->rays[i].end.x, 1e-12);
     EXPECT_NEAR(with_partial->rays[i].end.y, wheel_only->rays[i].end.y, 1e-12);
   }
+}
+
+// residual^α must land on ORB end_map at α=1 even when fused IMU yaw ≠ wheel yaw.
+TEST(ScanDeskewer, BracketedImuFusionPreservesOrbEndAnchor) {
+  // Same residual setup as BracketedDeskewDistributesVisualResidualAcrossSweep:
+  // stationary wheels, start_map=I, end_map={1,0,0}, start/end_wheel=I.
+  // Constant IMU ω rotates fused motion away from wheel identity; without the
+  // fused end_wheel residual fix, α=1 would not land on end_map translation.
+  const ScanValue scan = threeRayScan(0, 0.05F);
+  const ScanMotionBracket bracket{
+    0, 100'000'000, Pose2{}, Pose2{1.0, 0.0, 0.0}, Pose2{}, Pose2{}};
+  TimedPoseBuffer wheels = stationaryWheelBufferForSweep();
+  ImuYawBuffer imu = constantOmegaImu(100'000'000, 1.0);
+  ASSERT_TRUE(imu.covers(0, 100'000'000));
+
+  const auto result =
+    ScanDeskewer::deskewBracketed(scan, Pose2{}, wheels, bracket, &imu);
+  ASSERT_TRUE(result);
+  ASSERT_EQ(result->rays.size(), 3U);
+
+  // First ray (α=0): residual 0 → end near (2, 0) in map.
+  EXPECT_NEAR(result->rays[0].end.x, 2.0, 1e-6);
+  EXPECT_NEAR(result->rays[0].end.y, 0.0, 1e-6);
+
+  // Last ray (α=1): must land on end_map translation regardless of IMU yaw
+  // (range 2 + residual x=1 → x=3, y≈0).
+  EXPECT_NEAR(result->rays[2].end.x, 3.0, 1e-6);
+  EXPECT_NEAR(result->rays[2].end.y, 0.0, 1e-6);
 }
 
 }  // namespace

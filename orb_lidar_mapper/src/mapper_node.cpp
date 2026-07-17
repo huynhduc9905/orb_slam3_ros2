@@ -607,6 +607,21 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
     return PendingScanResult::kDropped;
   }
 
+  // Wait for IMU coverage when samples have been seen and the stream is still
+  // catching up to the scan end. Gate on imu_samples_ so unit tests with no
+  // IMU still commit immediately (wheel-only fallback, no hang). If newest
+  // already past end but covers is false → internal gap → fall through.
+  if (enable_imu_deskew_ && imu_buf_ && imu_samples_.load() > 0 &&
+      !imu_buf_->covers(pending.start_ns, pending.end_ns)) {
+    const auto newest_imu = imu_buf_->newestStamp();
+    const bool imu_still_catching_up = !newest_imu || *newest_imu < pending.end_ns;
+    if (imu_still_catching_up &&
+        !advancedBeyond(newest_wheel, pending.end_ns, timeout_ns) &&
+        !advancedBeyond(traj_->latestFrameStamp(), pending.end_ns, timeout_ns)) {
+      return PendingScanResult::kWaiting;
+    }
+  }
+
   ScanValue scan;
   scan.id = static_cast<uint64_t>(pending.start_ns);
   scan.stamp_ns = pending.start_ns;
@@ -632,8 +647,9 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
   };
 
   if (loss_scan) {
-    // LOST intervals keep the established wheel-only provisional geometry;
-    // timestamp-based membership survives callback reordering and recovery.
+    // LOST intervals keep provisional geometry (wheel + IMU fusion when
+    // coverage allows; otherwise wheel-only). Timestamp-based membership
+    // survives callback reordering and recovery.
     countImuFallbackIfNeeded();
     auto rays = ScanDeskewer::deskew(
       scan, Pose2{}, pending.base_to_lidar, *wheel_buf_, imu_ptr);

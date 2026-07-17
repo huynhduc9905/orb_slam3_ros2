@@ -127,5 +127,15 @@ TEST(ImuYawBuffer, CoversRequiresBracketOfInterval) {
   EXPECT_TRUE(buffer.covers(10'000'000, 20'000'000));
 }
 
+TEST(ImuYawBuffer, NewestStampEmptyThenTracksLastSample) {
+  ImuYawBuffer buffer(10'000'000'000LL);
+  EXPECT_FALSE(buffer.newestStamp().has_value());
+  ASSERT_TRUE(buffer.push({10'000'000, 1.0}));
+  ASSERT_TRUE(buffer.newestStamp().has_value());
+  EXPECT_EQ(*buffer.newestStamp(), 10'000'000);
+  ASSERT_TRUE(buffer.push({20'000'000, 1.0}));
+  EXPECT_EQ(*buffer.newestStamp(), 20'000'000);
+}
+
 }  // namespace
 }  // namespace orb_lidar_mapper
