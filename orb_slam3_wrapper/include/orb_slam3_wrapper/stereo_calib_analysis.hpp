@@ -20,6 +20,10 @@ std::vector<std::pair<std::size_t, std::size_t>> selectPosePairs(
     const std::vector<MotionInterval>& intervals, double min_yaw,
     double max_yaw);
 
+// Map yaw (any wrap) to one of 8 equal sectors over [0, 2π):
+// sector k covers [k * π/4, (k+1) * π/4).
+std::size_t sectorForYaw(double yaw);
+
 StereoEstimate robustEstimate(const std::vector<StereoCenterSample>& samples,
                               std::uint64_t seed,
                               const StereoThresholds& thresholds);

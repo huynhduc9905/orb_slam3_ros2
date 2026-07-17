@@ -31,16 +31,6 @@ bool inAnyInterval(std::int64_t stamp,
   return false;
 }
 
-std::size_t sectorForYaw(double yaw) {
-  double heading = Pose2::normalizeAngle(yaw);
-  if (heading < 0.0) {
-    heading += 2.0 * kPi;
-  }
-  const auto sector = static_cast<std::size_t>(
-      std::floor(heading * static_cast<double>(kNumYawSectors) / (2.0 * kPi)));
-  return std::min(sector, kNumYawSectors - 1U);
-}
-
 double median(std::vector<double> values) {
   if (values.empty()) {
     return std::numeric_limits<double>::quiet_NaN();
@@ -72,6 +62,22 @@ bool finiteMount(const MountXy& xy) {
 }
 
 }  // namespace
+
+std::size_t sectorForYaw(double yaw) {
+  // Reduce to [0, 2π) via fmod (avoids normalizeAngle ±π round-trip FP error
+  // at sector boundaries such as 7π/4).
+  const double two_pi = 2.0 * kPi;
+  double heading = std::fmod(yaw, two_pi);
+  if (heading < 0.0) {
+    heading += two_pi;
+  }
+  if (heading >= two_pi) {
+    heading = 0.0;
+  }
+  const auto sector = static_cast<std::size_t>(
+      std::floor(heading * static_cast<double>(kNumYawSectors) / two_pi));
+  return std::min(sector, kNumYawSectors - 1U);
+}
 
 std::vector<std::pair<std::size_t, std::size_t>> selectPosePairs(
     const std::vector<PlanarPose>& poses,

@@ -1,9 +1,13 @@
+#include <algorithm>
 #include <cmath>
 #include <set>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 
+#include "orb_slam3_wrapper/mount_xy_mapper.hpp"
 #include "orb_slam3_wrapper/planar_pose_projector.hpp"
 #include "orb_slam3_wrapper/stereo_calib_analysis.hpp"
 #include "orb_slam3_wrapper/stereo_rotation_center.hpp"
@@ -52,6 +56,30 @@ StereoCenterSample acceptedSample(std::size_t sector, MountXy xy) {
   s.mount_xy = xy;
   s.center = {xy.x_m, xy.y_m};
   return s;
+}
+
+bool hasReason(const StereoEstimate& est, const std::string& reason) {
+  return std::find(est.unreliable_reasons.begin(), est.unreliable_reasons.end(),
+                   reason) != est.unreliable_reasons.end();
+}
+
+TEST(StereoCalibAnalysis, SectorForYawEightEqualBins) {
+  // 8 equal sectors over [0, 2π): sector k covers [k*π/4, (k+1)*π/4).
+  for (std::size_t k = 0; k < 8; ++k) {
+    const double lo = static_cast<double>(k) * kPi / 4.0;
+    const double mid = lo + kPi / 8.0;
+    const double near_hi = lo + kPi / 4.0 - 1e-9;
+    EXPECT_EQ(sectorForYaw(lo), k) << "lo sector " << k;
+    EXPECT_EQ(sectorForYaw(mid), k) << "mid sector " << k;
+    EXPECT_EQ(sectorForYaw(near_hi), k) << "near_hi sector " << k;
+  }
+  // Wrap: 2π and negative angles.
+  EXPECT_EQ(sectorForYaw(0.0), 0u);
+  EXPECT_EQ(sectorForYaw(2.0 * kPi), 0u);
+  EXPECT_EQ(sectorForYaw(-kPi / 8.0), 7u);  // near 2π from below
+  EXPECT_EQ(sectorForYaw(-kPi), 4u);        // -π ≡ π → sector 4
+  EXPECT_EQ(sectorForYaw(kPi), 4u);
+  EXPECT_EQ(sectorForYaw(3.0 * kPi / 2.0), 6u);
 }
 
 TEST(StereoCalibAnalysis, RelativePoseFromPureSpinRecoversLeverArm) {
@@ -167,6 +195,7 @@ TEST(StereoCalibAnalysis, RobustEstimateUnreliableWithFewPairs) {
   EXPECT_FALSE(est.reliable);
   EXPECT_EQ(est.accepted_pairs, 10u);
   ASSERT_FALSE(est.unreliable_reasons.empty());
+  EXPECT_TRUE(hasReason(est, "insufficient_accepted_pairs"));
 }
 
 TEST(StereoCalibAnalysis, RobustEstimateUnreliableWithFewSectors) {
@@ -181,6 +210,109 @@ TEST(StereoCalibAnalysis, RobustEstimateUnreliableWithFewSectors) {
   const auto est = robustEstimate(samples, 9, thr);
   EXPECT_FALSE(est.reliable);
   EXPECT_EQ(est.sectors_used, 1u);
+  EXPECT_TRUE(hasReason(est, "insufficient_yaw_sectors"));
+}
+
+TEST(StereoCalibAnalysis, RobustEstimateUnreliableWithWideCi) {
+  // Many pairs / sectors but mount_xy spread so bootstrap CI half-width is large.
+  std::vector<StereoCenterSample> samples;
+  for (std::size_t i = 0; i < 48; ++i) {
+    const double x = (i % 2 == 0) ? 0.10 : 0.50;
+    const double y = (i % 2 == 0) ? 0.00 : 0.40;
+    samples.push_back(acceptedSample(i % 8, {x, y}));
+  }
+  StereoThresholds thr;
+  thr.min_accepted_pairs = 40;
+  thr.min_sectors = 6;
+  thr.max_ci_half_width_m = 0.015;
+  thr.max_abs_center_m = 1.0;
+
+  const auto est = robustEstimate(samples, 11, thr);
+  EXPECT_FALSE(est.reliable);
+  EXPECT_TRUE(hasReason(est, "confidence_interval_x_too_wide") ||
+              hasReason(est, "confidence_interval_y_too_wide"));
+}
+
+TEST(StereoCalibAnalysis, RobustEstimateUnreliableWithMaxAbsCenter) {
+  std::vector<StereoCenterSample> samples;
+  for (std::size_t i = 0; i < 48; ++i) {
+    const double noise = 0.0001 * static_cast<double>(static_cast<int>(i % 5) - 2);
+    samples.push_back(acceptedSample(i % 8, {1.50 + noise, 0.04 - noise}));
+  }
+  StereoThresholds thr;
+  thr.min_accepted_pairs = 40;
+  thr.min_sectors = 6;
+  thr.max_ci_half_width_m = 0.015;
+  thr.max_abs_center_m = 1.0;
+
+  const auto est = robustEstimate(samples, 13, thr);
+  EXPECT_FALSE(est.reliable);
+  EXPECT_TRUE(hasReason(est, "median_out_of_bounds"));
+}
+
+TEST(StereoCalibAnalysis, PureSpinPipelineRecoversKnownMountIdentityChain) {
+  // Full chain: pure spin → selectPosePairs → centerFromTransform →
+  // impliedCameraLinkXy (identity optical chain) → robustEstimate → classify.
+  const Point2 optical_in_base{0.32, 0.05};
+  const Point2 expected_c{-0.32, -0.05};
+  const MountXy recorded_xy{0.32, 0.05};
+
+  StaticCameraMount identity_mount;
+  identity_mount.T_base_camera_link.setIdentity();
+  identity_mount.T_camera_link_left_optical.setIdentity();
+
+  // Dense pure spin: Δθ = 0.20 rad between neighbors → pairs in [10°, 30°].
+  const auto poses = pureSpinTrajectory(optical_in_base, 64, 0.20);
+  StereoThresholds thr;
+  thr.min_accepted_pairs = 40;
+  thr.min_sectors = 6;
+  thr.max_ci_half_width_m = 0.015;
+  thr.agreement_floor_m = 0.010;
+  thr.max_abs_center_m = 1.0;
+  thr.min_pair_yaw_rad = 10.0 * kPi / 180.0;
+  thr.max_pair_yaw_rad = 30.0 * kPi / 180.0;
+
+  const auto pairs =
+      selectPosePairs(poses, /*intervals=*/{}, thr.min_pair_yaw_rad,
+                      thr.max_pair_yaw_rad);
+  ASSERT_GE(pairs.size(), thr.min_accepted_pairs);
+
+  std::vector<StereoCenterSample> samples;
+  samples.reserve(pairs.size());
+  for (const auto& [src, tgt] : pairs) {
+    const Pose2 source_to_target =
+        poses[tgt].pose.inverse().compose(poses[src].pose);
+    const auto center = centerFromTransform(source_to_target);
+    ASSERT_TRUE(center.has_value()) << "pair " << src << "->" << tgt;
+    EXPECT_NEAR(center->x, expected_c.x, 1e-6);
+    EXPECT_NEAR(center->y, expected_c.y, 1e-6);
+
+    StereoCenterSample sample;
+    sample.source_index = src;
+    sample.target_index = tgt;
+    sample.yaw_sector = sectorForYaw(poses[src].pose.yaw);
+    sample.accepted = true;
+    sample.center = *center;
+    sample.mount_xy = impliedCameraLinkXy(*center, identity_mount);
+    samples.push_back(sample);
+  }
+
+  const auto est = robustEstimate(samples, /*seed=*/42, thr);
+  EXPECT_TRUE(est.reliable) << [&] {
+    std::string s;
+    for (const auto& r : est.unreliable_reasons) s += r + ";";
+    return s;
+  }();
+  EXPECT_GE(est.accepted_pairs, thr.min_accepted_pairs);
+  EXPECT_GE(est.sectors_used, thr.min_sectors);
+  EXPECT_NEAR(est.median_xy.x_m, recorded_xy.x_m, 1e-4);
+  EXPECT_NEAR(est.median_xy.y_m, recorded_xy.y_m, 1e-4);
+
+  const auto agg = classify(est, recorded_xy, thr);
+  EXPECT_EQ(agg.result_class, ResultClass::kConsistent);
+  EXPECT_EQ(resultExitCode(agg.result_class), 0);
+  EXPECT_NEAR(agg.delta_xy.x_m, 0.0, 1e-4);
+  EXPECT_NEAR(agg.delta_xy.y_m, 0.0, 1e-4);
 }
 
 TEST(StereoCalibAnalysis, ClassifyLinfConsistent) {
