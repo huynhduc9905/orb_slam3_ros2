@@ -34,7 +34,8 @@ add_library(orb_slam3_wrapper_stereo_calib
   src/mount_xy_mapper.cpp
   src/stereo_calib_analysis.cpp
   src/stereo_bag_reader.cpp
-  src/stereo_calib_pipeline.cpp)
+  src/stereo_calib_pipeline.cpp
+  src/stereo_calib_report.cpp)
 target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -76,6 +77,9 @@ target_link_libraries(stereo_bag_reader_test
 
 ament_add_gtest(stereo_calib_pipeline_test test/stereo_calib_pipeline_test.cpp)
 target_link_libraries(stereo_calib_pipeline_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_calib_report_test test/stereo_calib_report_test.cpp)
+target_link_libraries(stereo_calib_report_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
