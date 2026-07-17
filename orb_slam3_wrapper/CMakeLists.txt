@@ -18,6 +18,8 @@ find_package(visualization_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2_msgs REQUIRED)
 
 add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/graph_semantics.cpp src/latest_image_worker.cpp src/wrapper_node.cpp)
 target_include_directories(orb_slam3_wrapper_core PUBLIC
@@ -25,6 +27,59 @@ target_include_directories(orb_slam3_wrapper_core PUBLIC
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(orb_slam3_wrapper_core sensor_msgs orb_slam3_msgs rclcpp cv_bridge diagnostic_msgs geometry_msgs nav_msgs tf2 tf2_ros visualization_msgs std_msgs ament_index_cpp message_filters)
 target_link_libraries(orb_slam3_wrapper_core ORB_SLAM3::ORB_SLAM3 Eigen3::Eigen)
+
+add_library(orb_slam3_wrapper_stereo_calib
+  src/stereo_rotation_center.cpp
+  src/planar_pose_projector.cpp
+  src/mount_xy_mapper.cpp
+  src/stereo_calib_analysis.cpp
+  src/stereo_bag_reader.cpp
+  src/stereo_calib_pipeline.cpp
+  src/stereo_calib_report.cpp)
+target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(orb_slam3_wrapper_stereo_calib PUBLIC
+  orb_slam3_wrapper_core
+  Eigen3::Eigen
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  tf2::tf2
+  cv_bridge::cv_bridge
+  sensor_msgs::sensor_msgs_library
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${geometry_msgs_TARGETS})
+
+ament_add_gtest(stereo_rotation_center_test test/stereo_rotation_center_test.cpp)
+target_link_libraries(stereo_rotation_center_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(planar_pose_projector_test test/planar_pose_projector_test.cpp)
+target_link_libraries(planar_pose_projector_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(mount_xy_mapper_test test/mount_xy_mapper_test.cpp)
+target_link_libraries(mount_xy_mapper_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_calib_analysis_test test/stereo_calib_analysis_test.cpp)
+target_link_libraries(stereo_calib_analysis_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_bag_reader_test test/stereo_bag_reader_test.cpp)
+target_link_libraries(stereo_bag_reader_test
+  orb_slam3_wrapper_stereo_calib
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  sensor_msgs::sensor_msgs_library
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${geometry_msgs_TARGETS})
+
+ament_add_gtest(stereo_calib_pipeline_test test/stereo_calib_pipeline_test.cpp)
+target_link_libraries(stereo_calib_pipeline_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_calib_report_test test/stereo_calib_report_test.cpp)
+target_link_libraries(stereo_calib_report_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
@@ -61,6 +116,14 @@ add_executable(orb_slam3_wrapper_node src/main.cpp)
 target_link_libraries(orb_slam3_wrapper_node orb_slam3_wrapper_core)
 ament_target_dependencies(orb_slam3_wrapper_node rclcpp)
 install(TARGETS orb_slam3_wrapper_node DESTINATION lib/${PROJECT_NAME})
+
+add_executable(stereo_rotation_center_check src/stereo_rotation_center_check.cpp)
+target_compile_features(stereo_rotation_center_check PUBLIC cxx_std_17)
+target_include_directories(stereo_rotation_center_check PRIVATE include)
+target_link_libraries(stereo_rotation_center_check orb_slam3_wrapper_stereo_calib)
+ament_target_dependencies(stereo_rotation_center_check ament_index_cpp)
+install(TARGETS stereo_rotation_center_check DESTINATION lib/${PROJECT_NAME})
+
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 ament_export_targets(orb_slam3_wrapper_targets HAS_LIBRARY_TARGET)
