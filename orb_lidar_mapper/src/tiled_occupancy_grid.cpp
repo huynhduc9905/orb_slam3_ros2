@@ -44,7 +44,9 @@ std::size_t localCoordinate(std::int64_t value) {
 bool validConfig(const GridConfig& config) {
   return std::isfinite(config.resolution_m) && config.resolution_m > 0.0 &&
          config.tile_size == kTileSize && std::isfinite(config.usable_range_m) &&
-         config.usable_range_m > 0.0 && finite(config.hit_log_odds) && finite(config.miss_log_odds) &&
+         config.usable_range_m > 0.0 && std::isfinite(config.hit_range_max_m) &&
+         config.hit_range_max_m > 0.0 && config.hit_range_max_m <= config.usable_range_m &&
+         finite(config.hit_log_odds) && finite(config.miss_log_odds) &&
          finite(config.min_log_odds) && finite(config.max_log_odds) &&
          finite(config.free_threshold) && finite(config.occupied_threshold) &&
          config.min_log_odds <= 0.0F && 0.0F <= config.max_log_odds &&
@@ -90,6 +92,7 @@ TiledOccupancyGrid::TiledOccupancyGrid(GridConfig config) : config_(config) {
 }
 
 void TiledOccupancyGrid::insert(const std::vector<Ray2>& rays) {
+  last_insert_ = {};
   const auto findTile = [this](std::int64_t tile_x, std::int64_t tile_y) -> Tile& {
     const auto found = std::find_if(tiles_.begin(), tiles_.end(), [=](const Tile& tile) {
       return tile.x == tile_x && tile.y == tile_y;
@@ -121,13 +124,24 @@ void TiledOccupancyGrid::insert(const std::vector<Ray2>& rays) {
       if (ray.has_hit && length == 0.0) {
         const auto x = floorCell(ray.origin.x, config_.resolution_m);
         const auto y = floorCell(ray.origin.y, config_.resolution_m);
-        if (x && y) update({*x, *y}, config_.hit_log_odds);
+        if (x && y) {
+          update({*x, *y}, config_.hit_log_odds);
+          ++last_insert_.hits_applied;
+        }
       }
       continue;
     }
-    const bool has_hit = ray.has_hit && length <= config_.usable_range_m;
-    const double used_length = infinite_clear ? config_.usable_range_m :
-                                              std::min(length, config_.usable_range_m);
+    const bool beyond_hit_cap = ray.has_hit && std::isfinite(length) && length > config_.hit_range_max_m;
+    const bool has_hit = ray.has_hit && length <= config_.hit_range_max_m;
+    double used_length;
+    if (infinite_clear) {
+      used_length = config_.usable_range_m;
+    } else if (beyond_hit_cap) {
+      used_length = config_.hit_range_max_m;
+      ++last_insert_.hits_range_skipped;
+    } else {
+      used_length = std::min(length, config_.usable_range_m);
+    }
     const auto start_x = floorCell(ray.origin.x, config_.resolution_m);
     const auto start_y = floorCell(ray.origin.y, config_.resolution_m);
     const auto end_x = floorCell(ray.origin.x + dx / length * used_length, config_.resolution_m);
@@ -149,9 +163,18 @@ void TiledOccupancyGrid::insert(const std::vector<Ray2>& rays) {
       if (twice_error > -delta_y) { error -= delta_y; x += step_x; }
       if (twice_error < delta_x) { error += delta_x; y += step_y; }
     }
-    if (has_hit) update(end, config_.hit_log_odds);
+    if (has_hit) {
+      update(end, config_.hit_log_odds);
+      ++last_insert_.hits_applied;
+    }
   }
+  cumulative_insert_.hits_applied += last_insert_.hits_applied;
+  cumulative_insert_.hits_range_skipped += last_insert_.hits_range_skipped;
 }
+
+InsertStats TiledOccupancyGrid::lastInsertStats() const { return last_insert_; }
+
+InsertStats TiledOccupancyGrid::cumulativeInsertStats() const { return cumulative_insert_; }
 
 GridSnapshot TiledOccupancyGrid::snapshot() const {
   GridSnapshot result;

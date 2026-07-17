@@ -7,16 +7,22 @@
 
 namespace orb_lidar_mapper {
 
+struct InsertStats {
+  std::uint64_t hits_applied{0};
+  std::uint64_t hits_range_skipped{0};
+};
+
 struct GridConfig {
   double resolution_m{0.05};
   int tile_size{64};
-  float hit_log_odds{0.85F};
-  float miss_log_odds{-0.40F};
+  float hit_log_odds{0.55F};
+  float miss_log_odds{-0.50F};
   float min_log_odds{-4.0F};
   float max_log_odds{4.0F};
   float occupied_threshold{0.619F};
   float free_threshold{-0.619F};
   double usable_range_m{12.0};
+  double hit_range_max_m{10.0};
 };
 
 struct GridSnapshot {
@@ -48,12 +54,16 @@ class TiledOccupancyGrid {
 
   void insert(const std::vector<Ray2>& rays);
   GridSnapshot snapshot() const;
+  InsertStats lastInsertStats() const;
+  InsertStats cumulativeInsertStats() const;
 
  private:
   struct Tile;
 
   GridConfig config_;
   std::vector<Tile> tiles_;
+  InsertStats last_insert_{};
+  InsertStats cumulative_insert_{};
 };
 
 }  // namespace orb_lidar_mapper
