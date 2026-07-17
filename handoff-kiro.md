@@ -161,6 +161,27 @@ The yaw threshold is intentionally conservative. A roughly 99 ms scan at 0.5–1
 
 Timing parameters are validated for finite values and safe nanosecond conversion.
 
+### Thin-wall occupancy (P0/P1)
+
+Occupancy insert policy was retuned to reduce forward wall thickening. Live and
+rebuild share the same `GridConfig`. Defaults on the mapper node:
+
+```text
+hit_range_max_m = 10.0     # max range for painting occupied hits
+hit_log_odds = 0.55        # softer hit (was 0.85)
+miss_log_odds = -0.50      # slightly stronger free (was -0.40)
+usable_range_m = 20.0      # miss/clear range (node default; GridConfig alone is 12.0)
+```
+
+Hits beyond `hit_range_max_m` are not marked occupied; free-space clearing still
+uses `usable_range_m` for normal rays (beyond-hit-cap finite hits clear only to
+the hit cap). Diagnostics on `/diagnostics` include `hits_applied` and
+`hits_range_skipped`.
+
+**Note:** the thickness fix is occupancy-first. IMU deskew is not yet
+implemented (P2+). Design:
+`docs/superpowers/specs/2026-07-17-orb-lidar-thin-walls-follow-orb-design.md`.
+
 ## Validation Completed
 
 The mapper was built and tested after the implementation and again after final-review fixes.
