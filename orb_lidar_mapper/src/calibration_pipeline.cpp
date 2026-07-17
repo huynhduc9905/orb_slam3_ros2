@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
+#include <iomanip>
+#include <iostream>
+#include <string>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -11,6 +14,10 @@
 
 namespace orb_lidar_mapper {
 namespace {
+
+void reportStage(int percent, const char* label) {
+  std::cerr << '[' << std::setw(3) << percent << "%] " << label << '\n' << std::flush;
+}
 
 constexpr std::int64_t kMinimumStableIntervalNs = 2'000'000'000LL;
 constexpr std::int64_t kPoseMaximumGapNs = 1'000'000'000LL;
@@ -203,6 +210,7 @@ CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
   CalibrationRun run;
   run.config = config;
   run.dataset = std::move(prepared.dataset);
+  reportStage(20, "selecting stable rotation intervals");
   const auto odom = makePoseBuffer(run.dataset);
   const auto intervals = selectStableRotationIntervals(
     run.dataset, config.min_abs_omega, config.max_abs_omega,
@@ -211,14 +219,17 @@ CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
 
   const auto odom_scans = std::move(prepared.odom_scans);
   if (odom_scans.size() < 3) throw std::runtime_error("no usable odometry-deskewed scans");
+  reportStage(25, "building common pair schedule");
   const auto schedule = selectCommonCalibrationSchedule(odom_scans, odom, intervals);
   if (schedule.empty()) throw std::runtime_error("no calibration scan pairs");
   const auto base_ids = orderedIds(odom_scans);
   PlanarIcp icp(config.icp);
 
+  reportStage(35, "estimating centers (odom deskew + ICP)");
   const auto odom_samples = estimateSamples(
     DeskewMethod::kOdom, odom_scans, schedule, base_ids, icp, 1.0, 0.25);
   const auto existing_scans = std::move(prepared.existing_scans);
+  reportStage(50, "estimating centers (existing /scan + ICP)");
   const auto existing_samples = estimateSamples(
     DeskewMethod::kExistingScan, existing_scans, schedule, base_ids, icp, 1.0, 0.25);
 
@@ -228,6 +239,11 @@ CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
   bool imu_converged = false;
   for (std::size_t iteration = 0; iteration < kMaximumImuIterations; ++iteration) {
     ++run.imu_iterations;
+    const int percent = 55 + static_cast<int>((20 * iteration) / kMaximumImuIterations);
+    const std::string imu_label = "IMU deskew + ICP iteration " +
+                                  std::to_string(iteration + 1) + "/" +
+                                  std::to_string(kMaximumImuIterations);
+    reportStage(percent, imu_label.c_str());
     std::vector<DeskewedScan> imu_scans;
     if (prepared.imu_scans_by_iteration.empty()) {
       imu_scans = deskewImu(run.dataset, imu_offset, config.range_cap_m);
@@ -266,8 +282,10 @@ CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
                                      kPoseMaximumGapNs);
     for (const auto& pose : prepared.sharpness_odom_poses) sharpness_odom.push(pose);
   }
+  reportStage(80, "evaluating map sharpness");
   run.sharpness = evaluateMapSharpness(
     run.dataset, odom_scans, sharpness_odom, preliminarySharpnessHint(run.methods));
+  reportStage(90, "classifying result");
   run.aggregate = classifyCalibration(
     {run.methods[0], run.methods[1], run.methods[2]}, run.sharpness,
     run.dataset.recorded_mount.x_m);
@@ -279,14 +297,17 @@ CalibrationRun runCalibrationDataset(const CalibrationConfig& config,
   validateCalibrationConfig(config);
   CalibrationPreparedDataset prepared;
   prepared.dataset = std::move(dataset);
+  reportStage(10, "deskewing scans with odometry");
   const auto odom = makePoseBuffer(prepared.dataset);
   prepared.odom_scans = deskewOdom(prepared.dataset, odom, config.range_cap_m);
+  reportStage(15, "adapting existing /scan clouds");
   prepared.existing_scans = deskewExisting(prepared.dataset, config.range_cap_m);
   return runCalibrationDataset(config, std::move(prepared));
 }
 
 CalibrationRun runCalibration(const CalibrationConfig& config) {
   validateCalibrationConfig(config);
+  reportStage(0, "reading bag");
   auto dataset = RotationBagReader::read(config.bag_path);
   return runCalibrationDataset(config, std::move(dataset));
 }

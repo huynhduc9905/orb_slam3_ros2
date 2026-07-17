@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -106,6 +108,18 @@ ScanValue convertScan(const sensor_msgs::msg::LaserScan& message, std::uint64_t 
 
 }  // namespace
 
+void reportBagReadProgress(std::uint64_t processed, std::uint64_t total) {
+  if (total == 0) {
+    std::cerr << "\r[  0%] reading bag ... " << processed << " msgs" << std::flush;
+    return;
+  }
+  const int percent = static_cast<int>((100ULL * processed) / total);
+  const int filled = std::min(30, (30 * percent) / 100);
+  std::cerr << "\r[" << std::setw(3) << percent << "%] reading bag [";
+  for (int i = 0; i < 30; ++i) std::cerr << (i < filled ? '#' : '-');
+  std::cerr << "] " << processed << "/" << total << " msgs" << std::flush;
+}
+
 RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
   if (!std::filesystem::exists(bag_path)) {
     throw std::runtime_error("bag path does not exist: " + bag_path.string());
@@ -113,6 +127,8 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
 
   rosbag2_cpp::Reader reader;
   reader.open({bag_path.string(), "mcap"}, {"cdr", "cdr"});
+  const auto metadata = reader.get_metadata();
+  const std::uint64_t total_messages = metadata.message_count;
   RotationDataset data;
   std::map<std::string, bool> seen;
   std::int64_t previous_raw = 0, previous_undistorted = 0, previous_odom = 0;
@@ -122,6 +138,8 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
   std::int64_t pending_imu_stamp = 0;
   long double pending_imu_sum = 0.0L;
   std::size_t pending_imu_count = 0;
+  std::uint64_t processed_messages = 0;
+  std::uint64_t next_progress_at = 0;
 
   const auto flushImu = [&]() {
     if (pending_imu_count == 0) {
@@ -134,8 +152,17 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
     pending_imu_count = 0;
   };
 
+  reportBagReadProgress(0, total_messages);
   while (reader.has_next()) {
     const auto message = reader.read_next();
+    ++processed_messages;
+    if (processed_messages >= next_progress_at || !reader.has_next()) {
+      reportBagReadProgress(processed_messages, total_messages);
+      const auto step = total_messages == 0
+        ? 1000ULL
+        : std::max<std::uint64_t>(1, total_messages / 100);
+      next_progress_at = processed_messages + step;
+    }
     const auto& topic = message->topic_name;
     seen[topic] = true;
     if (topic == kRawTopic) {
@@ -223,6 +250,10 @@ RotationDataset RotationBagReader::read(const std::filesystem::path& bag_path) {
   if (std::abs(Pose2::normalizeAngle(data.recorded_mount.yaw_rad - kPi)) > 1e-6) {
     throw std::runtime_error("recorded base_scan.yaw is not pi");
   }
+  std::cerr << "\n[  5%] bag loaded: raw=" << data.raw_scans.size()
+            << " scan=" << data.undistorted_scans.size()
+            << " odom=" << data.odom_poses.size()
+            << " imu=" << data.imu_yaw_rates.size() << '\n';
   return data;
 }
 

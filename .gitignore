@@ -5,6 +5,7 @@ log/
 node_modules/
 dist/
 artifacts/
+tools/lidar-rotation-center-report/
 *.osa
 ORBvoc.txt
 __pycache__/

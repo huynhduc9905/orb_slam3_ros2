@@ -85,11 +85,23 @@ int main(int argc, char** argv) {
     return 1;
   }
   try {
+    std::cerr << "lidar_rotation_center_check\n"
+              << "  bag:    " << config.bag_path << '\n'
+              << "  output: " << config.output_dir << '\n';
     const auto run = runCalibration(config);
+    std::cerr << "[ 95%] writing report\n";
     writeCalibrationReport(run);
+    std::cerr << "[100%] done  classification="
+              << (run.aggregate.classification == ResultClass::kConsistent
+                    ? "CONSISTENT"
+                    : run.aggregate.classification == ResultClass::kLikelyOffsetError
+                        ? "LIKELY_OFFSET_ERROR"
+                        : "INCONCLUSIVE")
+              << "  consensus_offset_m=" << run.aggregate.consensus_offset_m
+              << '\n';
     return resultExitCode(run.aggregate.classification);
   } catch (const std::exception& error) {
-    std::cerr << "calibration operational failure: " << error.what() << '\n';
+    std::cerr << "\ncalibration operational failure: " << error.what() << '\n';
     return 1;
   }
 }
