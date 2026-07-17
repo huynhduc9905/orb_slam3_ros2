@@ -18,6 +18,8 @@ find_package(visualization_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(tf2_msgs REQUIRED)
 
 add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/graph_semantics.cpp src/latest_image_worker.cpp src/wrapper_node.cpp)
 target_include_directories(orb_slam3_wrapper_core PUBLIC
@@ -30,11 +32,22 @@ add_library(orb_slam3_wrapper_stereo_calib
   src/stereo_rotation_center.cpp
   src/planar_pose_projector.cpp
   src/mount_xy_mapper.cpp
-  src/stereo_calib_analysis.cpp)
+  src/stereo_calib_analysis.cpp
+  src/stereo_bag_reader.cpp)
 target_include_directories(orb_slam3_wrapper_stereo_calib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(orb_slam3_wrapper_stereo_calib PUBLIC Eigen3::Eigen)
+target_link_libraries(orb_slam3_wrapper_stereo_calib PUBLIC
+  Eigen3::Eigen
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  tf2::tf2
+  cv_bridge::cv_bridge
+  sensor_msgs::sensor_msgs_library
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${geometry_msgs_TARGETS})
 
 ament_add_gtest(stereo_rotation_center_test test/stereo_rotation_center_test.cpp)
 target_link_libraries(stereo_rotation_center_test orb_slam3_wrapper_stereo_calib)
@@ -47,6 +60,17 @@ target_link_libraries(mount_xy_mapper_test orb_slam3_wrapper_stereo_calib)
 
 ament_add_gtest(stereo_calib_analysis_test test/stereo_calib_analysis_test.cpp)
 target_link_libraries(stereo_calib_analysis_test orb_slam3_wrapper_stereo_calib)
+
+ament_add_gtest(stereo_bag_reader_test test/stereo_bag_reader_test.cpp)
+target_link_libraries(stereo_bag_reader_test
+  orb_slam3_wrapper_stereo_calib
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  sensor_msgs::sensor_msgs_library
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${tf2_msgs_TARGETS}
+  ${geometry_msgs_TARGETS})
 
 ament_add_gtest(calibration_test test/calibration_test.cpp)
 target_include_directories(calibration_test PRIVATE include)
