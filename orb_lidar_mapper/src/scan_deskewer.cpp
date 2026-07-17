@@ -212,18 +212,22 @@ std::optional<BracketedDeskewResult> ScanDeskewer::deskewBracketed(
     return std::nullopt;
   }
 
-  const bool use_imu = imuCoversFullSweep(imu, scan, *time_increment);
   // residual^α is predicted_end^{-1} * end_map. When fusing IMU yaw into ray
   // motion, predicted_end must use the same fused end motion so α=1 lands on
-  // ORB end_map even if IMU yaw ≠ wheel yaw.
+  // ORB end_map even if IMU yaw ≠ wheel yaw. Require IMU coverage through the
+  // ORB end stamp (may be after last ray); if fuse to that stamp fails, fall
+  // back to wheel-only for the whole scan — never hard-reject for IMU alone.
+  bool use_imu = imuCoversFullSweep(imu, scan, *time_increment) && imu != nullptr &&
+    imu->covers(scan.stamp_ns, bracket.end_stamp_ns);
   ScanMotionBracket effective = bracket;
   if (use_imu) {
     const auto fused_end =
       fuseWheelXyImuYaw(wheels, *imu, scan.stamp_ns, bracket.end_stamp_ns);
     if (!fused_end) {
-      return std::nullopt;
+      use_imu = false;
+    } else {
+      effective.end_wheel_pose = *fused_end;
     }
-    effective.end_wheel_pose = *fused_end;
   }
 
   const auto reference_wheel = wheels.interpolate(scan.stamp_ns);
@@ -267,8 +271,9 @@ std::optional<BracketedDeskewResult> ScanDeskewer::deskewBracketed(
       const auto fused =
         fuseWheelXyImuYaw(wheels, *imu, scan.stamp_ns, *stamp_ns);
       if (!fused) {
-        // Coverage claimed full sweep but this ray failed — treat as hard fail
-        // like missing wheel coverage for deferred commits.
+        // Coverage claimed full sweep but this ray failed — fall back is not
+        // mid-scan mixable; abort IMU path is already gated. Treat as wheel
+        // hard-fail only when wheels also cannot supply the ray (checked above).
         return std::nullopt;
       }
       motion_pose = *fused;

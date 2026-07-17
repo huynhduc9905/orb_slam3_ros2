@@ -417,6 +417,39 @@ TEST(ScanDeskewer, BracketedFallsBackToWheelOnlyWhenImuCoverageFails) {
   }
 }
 
+// IMU covers last ray but not the later ORB end stamp → wheel-only, not drop.
+TEST(ScanDeskewer, BracketedFallsBackWhenImuMissesOrbEndStamp) {
+  const ScanValue scan = threeRayScan(0, 0.05F);  // last ray ~100 ms
+  // ORB end is 150 ms — after last ray (allowed by visual_anchor_max_gap).
+  const ScanMotionBracket bracket{
+    0, 150'000'000, Pose2{}, Pose2{1.0, 0.0, 0.0}, Pose2{}, Pose2{}};
+  TimedPoseBuffer wheels(1'000'000'000LL, 200'000'000LL);
+  ASSERT_TRUE(wheels.push({0, Pose2{}}));
+  ASSERT_TRUE(wheels.push({50'000'000, Pose2{}}));
+  ASSERT_TRUE(wheels.push({100'000'000, Pose2{}}));
+  ASSERT_TRUE(wheels.push({150'000'000, Pose2{}}));
+
+  ImuYawBuffer imu(10'000'000'000LL);
+  // Cover sweep through last ray only; leave a gap before ORB end.
+  for (std::int64_t t = 0; t <= 100'000'000; t += 5'000'000) {
+    ASSERT_TRUE(imu.push({t, 1.0}));
+  }
+  ASSERT_TRUE(imu.covers(0, 100'000'000));
+  ASSERT_FALSE(imu.covers(0, 150'000'000));
+
+  const auto with_partial =
+    ScanDeskewer::deskewBracketed(scan, Pose2{}, wheels, bracket, &imu);
+  const auto wheel_only =
+    ScanDeskewer::deskewBracketed(scan, Pose2{}, wheels, bracket);
+  ASSERT_TRUE(with_partial) << "must not hard-reject when IMU misses ORB end";
+  ASSERT_TRUE(wheel_only);
+  ASSERT_EQ(with_partial->rays.size(), wheel_only->rays.size());
+  for (std::size_t i = 0; i < wheel_only->rays.size(); ++i) {
+    EXPECT_NEAR(with_partial->rays[i].end.x, wheel_only->rays[i].end.x, 1e-12);
+    EXPECT_NEAR(with_partial->rays[i].end.y, wheel_only->rays[i].end.y, 1e-12);
+  }
+}
+
 // residual^α must land on ORB end_map at α=1 even when fused IMU yaw ≠ wheel yaw.
 TEST(ScanDeskewer, BracketedImuFusionPreservesOrbEndAnchor) {
   // Same residual setup as BracketedDeskewDistributesVisualResidualAcrossSweep:
