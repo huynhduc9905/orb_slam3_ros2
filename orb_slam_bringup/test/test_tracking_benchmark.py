@@ -147,6 +147,17 @@ def test_full_stack_fails_below_eighty_percent():
     assert comparison["passed"] is False
 
 
+RUNNER_PATH = Path(__file__).resolve().parents[2] / "tools" / "run_tracking_performance_benchmark.sh"
+
+def test_runner_uses_orb_only_sweep_and_full_stack_comparison():
+    text = RUNNER_PATH.read_text(encoding="utf-8")
+    assert "benchmark_mode:=orb_only" in text
+    assert "benchmark_mode:=full_stack" in text
+    assert "tracking_benchmark select" in text
+    assert "tracking_benchmark compare" in text
+    assert "--source-camera-hz" in text
+    assert "--max-rate" in text
+
 def test_cli_select_and_compare(tmp_path: Path, capsys):
     res_2x = tmp_path / "orb-2x.json"
     res_3x = tmp_path / "orb-3x.json"
