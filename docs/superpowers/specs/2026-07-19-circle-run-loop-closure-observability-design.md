@@ -89,3 +89,11 @@ These items are documented for later, evidence-gated investigation. They are not
 - Existing wrapper graph-semantic tests continue to prove legacy event types.
 - The `orb_slam_bringup` Python test suite and relevant wrapper C++ tests pass.
 - The three-run runner is executed against `/home/duc/robot/bag/circle-run`; its generated summary is the empirical result, not a prerequisite for unit-test success.
+
+## Measured Root Cause
+
+Three real-time circle-run trials at commit 6609188 logged one `*Loop detected`
+each, no `BAD LOOP!!!`, and balanced Local Mapping STOP/RELEASE counts, but
+recorded zero wrapper loop events. The root cause was the pre-edge
+`InformNewBigChange()` ordering in `LoopClosing::CorrectLoop()`; the wrapper
+consumed a graph snapshot before `AddLoopEdge()` populated the closure edge.
