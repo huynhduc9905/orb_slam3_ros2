@@ -327,10 +327,22 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
   graph_pub_->publish(output); path_pub_->publish(path); last_graph_ = output; ++graph_publish_count_;
   keyframe_markers.markers.push_back(keyframe_marker); loop_markers.markers.push_back(loop_marker);
   keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
-  for (const auto type : classifyGraphDelta(previous_graph_, graph)) {
+  const auto evidence = classifyGraphDeltaEvidence(previous_graph_, graph);
+  for (const auto type : evidence.event_types) {
+    if (type == orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED) continue;
     orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = type;
     event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
     event.detail = "semantic graph evidence observed in snapshot delta";
+    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+  }
+  for (const auto& loop_edge : evidence.loop_edges) {
+    orb_slam3_msgs::msg::TrackingEvent event; event.header = header;
+    event.type = orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED;
+    event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
+    event.detail = "loop_edge=" + std::to_string(loop_edge.first_keyframe_id) + "-" + std::to_string(loop_edge.second_keyframe_id) +
+                   " classification=" + loop_edge.classification +
+                   " maps=" + std::to_string(loop_edge.first_map_id) + "," + std::to_string(loop_edge.second_map_id) +
+                   " active_map=" + std::to_string(loop_edge.active_map_id);
     events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
   }
   previous_graph_ = graph;
