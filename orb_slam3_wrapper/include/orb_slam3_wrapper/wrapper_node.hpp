@@ -56,6 +56,7 @@ private:
   void imageCallback(const Image::ConstSharedPtr left, const Image::ConstSharedPtr right);
   void infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left);
   void processStereo(const Image& left, const Image& right);
+  void pollGraphChanges();
   cv::Mat mono8(const Image& image) const;
   void publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_msgs::msg::Header& header);
   void publishDiagnostics(const std::string& level, const std::string& message);
@@ -96,6 +97,7 @@ private:
   std::unique_ptr<message_filters::Subscriber<Image>> left_sync_sub_;
   std::unique_ptr<message_filters::Subscriber<Image>> right_sync_sub_;
   std::unique_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_;
+  rclcpp::TimerBase::SharedPtr graph_timer_;
   orb_slam3_msgs::msg::TrackedFrame last_tracked_;
   orb_slam3_msgs::msg::GraphSnapshot last_graph_;
   orb_slam3_msgs::msg::TrackingEvent last_event_;

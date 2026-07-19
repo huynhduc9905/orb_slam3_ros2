@@ -1,6 +1,7 @@
 #include "orb_slam3_wrapper/wrapper_node.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <opencv2/imgcodecs.hpp>
 #include <tf2/exceptions.h>
@@ -126,6 +127,10 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
     imageCallback(left, right);
   });
 
+  graph_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this] {
+    pollGraphChanges();
+  });
+
   if (!backend_ && !settings.empty() && !vocabulary.empty()) {
     backend_ = std::make_unique<OrbSlam3Backend>(vocabulary, settings);
   }
@@ -190,6 +195,13 @@ void WrapperNode::processStereoForTest(const Image& left, const Image& right) {
   }
 }
 
+void WrapperNode::pollGraphChanges() {
+  if (!backend_ || !backend_configured_ || last_tracked_.header.frame_id.empty()) return;
+  if (!backend_->mapChanged()) return;
+  const auto graph = backend_->graphSnapshot();
+  if (graph.revision != last_graph_revision_) publishGraph(graph, last_tracked_.header);
+}
+
 void WrapperNode::processStereo(const Image& left, const Image& right) {
   if (!backend_) { publishDiagnostics("ERROR", "ORB backend is not configured"); return; }
   if (!left_info_ || !right_info_) { publishDiagnostics("ERROR", "stereo CameraInfo is not available"); return; }
@@ -240,18 +252,13 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
 
   const auto stamp = rclcpp::Time(left.header.stamp);
   const auto frame = backend_->trackStereo(mono8(left), mono8(right), stamp.seconds());
-  std::optional<ORB_SLAM3::GraphSnapshot> graph_to_publish;
-  if (backend_->mapChanged()) {
-    const auto graph = backend_->graphSnapshot();
-    if (graph.revision != last_graph_revision_) graph_to_publish = graph;
-  }
   orb_slam3_msgs::msg::TrackedFrame output;
   output.header.stamp = left.header.stamp; output.header.frame_id = map_frame_;
   output.tracking_state = static_cast<std::uint8_t>(frame.tracking_state);
   output.pose_valid = frame.pose_valid;
   output.map_id = frame.map_id; output.reference_keyframe_id = frame.reference_keyframe_id;
   output.tracked_keypoints = static_cast<std::uint32_t>(frame.tracked_keypoints);
-  output.graph_revision = graph_to_publish ? graph_to_publish->revision : last_graph_revision_;
+  output.graph_revision = last_graph_revision_;
   if (frame.pose_valid && converter_) {
     if (frame.tracking_state == orb_slam3_msgs::msg::TrackedFrame::OK && !converter_->initialized())
       converter_->anchor(frame.T_world_camera);
@@ -279,8 +286,6 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
     event.detail = "first valid ORB pose"; events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
   }
   last_tracking_state_ = frame.tracking_state;
-
-  if (graph_to_publish) publishGraph(*graph_to_publish, output.header);
 
   if (tracking_image_rate_hz_ > 0.0 && (last_tracking_image_time_.nanoseconds() == 0 ||
       (stamp - last_tracking_image_time_).seconds() >= 1.0 / tracking_image_rate_hz_)) {
