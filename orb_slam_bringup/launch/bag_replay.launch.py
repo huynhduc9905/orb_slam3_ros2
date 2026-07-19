@@ -268,26 +268,30 @@ def _setup(context, *args, **kwargs):
     except Exception:  # pragma: no cover
         settings_file = ""
 
+    wrapper_log_path = str(Path(artifact_dir) / "orb_slam3_wrapper.log")
+
     actions.append(
-        Node(
-            package="orb_slam3_wrapper",
-            executable="orb_slam3_wrapper_node",
-            name="orb_slam3_wrapper",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "left_image_topic": profile["camera"]["left_image"],
-                    "right_image_topic": profile["camera"]["right_image"],
-                    "left_info_topic": profile["camera"]["left_info"],
-                    "right_info_topic": profile["camera"]["right_info"],
-                    "base_frame": "base_link",
-                    "map_frame": "orb_map",
-                    "settings_file": settings_file,
-                }
+        ExecuteProcess(
+            cmd=[
+                "sh",
+                "-c",
+                f"ros2 run orb_slam3_wrapper orb_slam3_wrapper_node --ros-args "
+                f"-p use_sim_time:=true "
+                f"-p left_image_topic:={profile["camera"]["left_image"]} "
+                f"-p right_image_topic:={profile["camera"]["right_image"]} "
+                f"-p left_info_topic:={profile["camera"]["left_info"]} "
+                f"-p right_info_topic:={profile["camera"]["right_info"]} "
+                f"-p base_frame:=base_link "
+                f"-p map_frame:=orb_map "
+                f"-p settings_file:={settings_file} "
+                f"2>&1 | tee -a \"{wrapper_log_path}\""
             ],
+            name="orb_slam3_wrapper",
             output="screen",
+            shell=True,
         )
     )
+
 
     # Lidar mapper
     if benchmark_mode in ("off", "full_stack"):

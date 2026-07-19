@@ -104,3 +104,91 @@ def test_readme_documents_tracking_performance_benchmark():
     assert "first ORB-only rate" in text
     assert "tracking_benchmark.json" in text
 
+
+def test_wrapper_log_capture_configuration():
+    from launch import LaunchContext
+    import sys
+    import os
+
+    sys.path.insert(0, str(BAG_REPLAY_LAUNCH_PATH.parent))
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bag_replay", str(BAG_REPLAY_LAUNCH_PATH))
+        bag_replay = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bag_replay)
+        desc = bag_replay.generate_launch_description()
+
+        opaque_action = None
+        for entity in desc.entities:
+            if type(entity).__name__ == "OpaqueFunction":
+                opaque_action = entity
+                break
+        
+        assert opaque_action is not None
+        
+        context = LaunchContext()
+        os.environ['ROS_DOMAIN_ID'] = '42'
+        context.launch_configurations['bag_path'] = '/home/duc/robot/mock_bag'
+        context.launch_configurations['artifact_dir'] = '/tmp/path with spaces'
+        context.launch_configurations['rate'] = '1.0'
+        context.launch_configurations['ros_domain_id'] = '42'
+        context.launch_configurations['publish_odom_tf'] = 'true'
+        context.launch_configurations['start_dashboard'] = 'false'
+        context.launch_configurations['dashboard_host'] = 'localhost'
+        context.launch_configurations['benchmark_mode'] = 'off'
+        context.launch_configurations['benchmark_min_duration_s'] = '10.0'
+        
+        import unittest.mock
+        with unittest.mock.patch.object(bag_replay, "_inspect_bag_static_pairs", return_value=[]):
+            actions = opaque_action.execute(context)
+
+
+        
+        wrapper_action = None
+        for action in actions:
+            if type(action).__name__ == "ExecuteProcess":
+                cmd_str = ""
+                if hasattr(action, "cmd"):
+                    cmd = action.cmd
+                    cmd = action.cmd
+                    resolved_cmd_temp = []
+                    for c in cmd:
+                        if isinstance(c, list):
+                            resolved_cmd_temp.append("".join([sub_c.perform(context) if hasattr(sub_c, "perform") else str(sub_c) for sub_c in c]))
+                        else:
+                            resolved_cmd_temp.append(c.perform(context) if hasattr(c, "perform") else str(c))
+                    cmd_str = " ".join(resolved_cmd_temp)
+                action_name = ""
+                if hasattr(action, "name") and action.name:
+                    if isinstance(action.name, list):
+                        action_name = "".join([c.perform(context) if hasattr(c, "perform") else str(c) for c in action.name])
+                    else:
+                        action_name = str(action.name)
+                
+                if action_name == "orb_slam3_wrapper" or "orb_slam3_wrapper_node" in cmd_str:
+                    wrapper_action = action
+                    break
+
+
+
+        assert wrapper_action is not None
+
+        cmd = wrapper_action.cmd
+        resolved_cmd = []
+        for c in cmd:
+            if isinstance(c, list):
+                resolved_cmd.append("".join([sub_c.perform(context) if hasattr(sub_c, "perform") else str(sub_c) for sub_c in c]))
+            else:
+                resolved_cmd.append(c.perform(context) if hasattr(c, "perform") else str(c))
+
+        
+        cmd_str = " ".join(resolved_cmd)
+        assert "ros2 run orb_slam3_wrapper orb_slam3_wrapper_node" in cmd_str
+        assert "2>&1 | tee -a" in cmd_str
+        
+        assert "'/tmp/path with spaces/orb_slam3_wrapper.log'" in cmd_str or '"/tmp/path with spaces/orb_slam3_wrapper.log"' in cmd_str
+        
+        assert getattr(wrapper_action, 'shell', False) == True
+
+    finally:
+        sys.path.pop(0)
