@@ -49,6 +49,7 @@ setup(
             "dashboard_server = orb_slam_bringup.dashboard_server:main",
             "tf_audit = orb_slam_bringup.tf_audit:main",
             "metrics_recorder = orb_slam_bringup.metrics_recorder:main",
+            "tracking_benchmark_probe = orb_slam_bringup.tracking_benchmark_probe:main",
             "orb_slam_report_check = orb_slam_bringup.report:check_main",
             "orb_slam_compare_runs = orb_slam_bringup.report:compare_main",
         ],

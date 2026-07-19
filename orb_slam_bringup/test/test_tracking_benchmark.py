@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from types import SimpleNamespace
 import pytest
 
 from orb_slam_bringup.tracking_benchmark import (
@@ -10,6 +11,24 @@ from orb_slam_bringup.tracking_benchmark import (
     main,
     select_stress_point,
 )
+from orb_slam_bringup.tracking_benchmark_probe import TrackingBenchmarkProbe
+
+
+def test_probe_writes_single_result_after_tracking_initializes(tmp_path, monkeypatch):
+    now = iter([10.0, 10.5, 11.0])
+    monkeypatch.setattr("orb_slam_bringup.tracking_benchmark_probe.time.monotonic", lambda: next(now))
+    probe = TrackingBenchmarkProbe.for_test(
+        artifact_dir=tmp_path, mode="orb_only", playback_rate=3.0, min_duration_s=0.5
+    )
+
+    probe.on_tracked_frame(SimpleNamespace(tracking_state=0))
+    probe.on_tracked_frame(SimpleNamespace(tracking_state=2))
+    probe.on_tracked_frame(SimpleNamespace(tracking_state=2))
+    probe.flush()
+
+    data = json.loads((tmp_path / "tracking_benchmark.json").read_text())
+    assert data["received_frames"] == 2
+    assert data["initialized"] is True
 
 
 def test_counter_starts_at_first_ok_and_counts_every_later_frame():
