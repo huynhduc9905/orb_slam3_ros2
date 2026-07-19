@@ -97,3 +97,39 @@ def test_independent_diagnoses_multiple_errors(tmp_path: Path):
     
     # Assert exact diagnoses in exact order
     assert evidence["diagnoses"] == ["no_core_loop_detected", "loop_rebuild_missing"]
+
+def test_runner_script_contract():
+    script_path = Path(__file__).parent.parent.parent / "tools" / "run_circle_loop_closure_evaluation.sh"
+    if not script_path.exists():
+        # Create a dummy to fail the exact test first
+        pass
+    
+    text = script_path.read_text(encoding="utf-8")
+    assert "rate:=1" in text
+    assert "benchmark_mode:=off" in text
+    assert "run-1" in text and "run-2" in text and "run-3" in text
+    assert "loop_closure_evidence" in text
+    assert "passed_runs" in text
+
+def test_summarize_runs(tmp_path: Path):
+    from orb_slam_bringup.loop_closure_evidence import summarize_runs
+    
+    paths = []
+    for i, p_val in enumerate([True, True, False]):
+        p = tmp_path / f"run-{i+1}.json"
+        p.write_text(json.dumps({"passed": p_val}))
+        paths.append(p)
+        
+    res = summarize_runs(paths)
+    assert res["passed_runs"] == 2
+    assert res["passed"] is True
+    
+    paths2 = []
+    for i, p_val in enumerate([True, False, False]):
+        p = tmp_path / f"run-{i+4}.json"
+        p.write_text(json.dumps({"passed": p_val}))
+        paths2.append(p)
+        
+    res2 = summarize_runs(paths2)
+    assert res2["passed_runs"] == 1
+    assert res2["passed"] is False
