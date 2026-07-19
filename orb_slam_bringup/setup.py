@@ -52,6 +52,7 @@ setup(
             "tracking_benchmark_probe = orb_slam_bringup.tracking_benchmark_probe:main",
             "orb_slam_report_check = orb_slam_bringup.report:check_main",
             "orb_slam_compare_runs = orb_slam_bringup.report:compare_main",
+            "loop_closure_evidence = orb_slam_bringup.loop_closure_evidence:main",
         ],
     },
 )
