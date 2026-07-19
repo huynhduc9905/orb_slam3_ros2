@@ -109,6 +109,8 @@ def test_wrapper_log_capture_configuration():
     from launch import LaunchContext
     import sys
     import os
+    import shlex
+    import subprocess
 
     sys.path.insert(0, str(BAG_REPLAY_LAUNCH_PATH.parent))
     try:
@@ -129,7 +131,7 @@ def test_wrapper_log_capture_configuration():
         context = LaunchContext()
         os.environ['ROS_DOMAIN_ID'] = '42'
         context.launch_configurations['bag_path'] = '/home/duc/robot/mock_bag'
-        context.launch_configurations['artifact_dir'] = '/tmp/path with spaces'
+        context.launch_configurations['artifact_dir'] = '/tmp/path with spaces and $meta'
         context.launch_configurations['rate'] = '1.0'
         context.launch_configurations['ros_domain_id'] = '42'
         context.launch_configurations['publish_odom_tf'] = 'true'
@@ -142,34 +144,20 @@ def test_wrapper_log_capture_configuration():
         with unittest.mock.patch.object(bag_replay, "_inspect_bag_static_pairs", return_value=[]):
             actions = opaque_action.execute(context)
 
-
-        
         wrapper_action = None
         for action in actions:
             if type(action).__name__ == "ExecuteProcess":
-                cmd_str = ""
-                if hasattr(action, "cmd"):
-                    cmd = action.cmd
-                    cmd = action.cmd
-                    resolved_cmd_temp = []
-                    for c in cmd:
-                        if isinstance(c, list):
-                            resolved_cmd_temp.append("".join([sub_c.perform(context) if hasattr(sub_c, "perform") else str(sub_c) for sub_c in c]))
-                        else:
-                            resolved_cmd_temp.append(c.perform(context) if hasattr(c, "perform") else str(c))
-                    cmd_str = " ".join(resolved_cmd_temp)
-                action_name = ""
-                if hasattr(action, "name") and action.name:
-                    if isinstance(action.name, list):
-                        action_name = "".join([c.perform(context) if hasattr(c, "perform") else str(c) for c in action.name])
+                cmd = action.cmd
+                resolved_cmd = []
+                for c in cmd:
+                    if isinstance(c, list):
+                        resolved_cmd.append("".join([sub_c.perform(context) if hasattr(sub_c, "perform") else str(sub_c) for sub_c in c]))
                     else:
-                        action_name = str(action.name)
+                        resolved_cmd.append(c.perform(context) if hasattr(c, "perform") else str(c))
                 
-                if action_name == "orb_slam3_wrapper" or "orb_slam3_wrapper_node" in cmd_str:
+                if resolved_cmd and resolved_cmd[0] == "bash" and "orb_slam3_wrapper" in resolved_cmd[-1]:
                     wrapper_action = action
                     break
-
-
 
         assert wrapper_action is not None
 
@@ -181,14 +169,33 @@ def test_wrapper_log_capture_configuration():
             else:
                 resolved_cmd.append(c.perform(context) if hasattr(c, "perform") else str(c))
 
+        assert resolved_cmd[:4] == ["bash", "-o", "pipefail", "-c"]
+        script_content = resolved_cmd[4]
+
+        parsed = shlex.split(script_content)
+        assert parsed[0] == "ros2"
+        assert parsed[1] == "run"
+        assert parsed[2] == "orb_slam3_wrapper"
+        assert parsed[3] == "orb_slam3_wrapper_node"
         
-        cmd_str = " ".join(resolved_cmd)
-        assert "ros2 run orb_slam3_wrapper orb_slam3_wrapper_node" in cmd_str
-        assert "2>&1 | tee -a" in cmd_str
+        assert "__node:=orb_slam3_wrapper" in parsed
+        assert "use_sim_time:=true" in parsed
         
-        assert "'/tmp/path with spaces/orb_slam3_wrapper.log'" in cmd_str or '"/tmp/path with spaces/orb_slam3_wrapper.log"' in cmd_str
+        # Verify quotation of settings path
+        settings_idx = next(i for i, arg in enumerate(parsed) if arg.startswith("settings_file:="))
+        assert parsed[settings_idx].startswith("settings_file:=")
         
-        assert getattr(wrapper_action, 'shell', False) == True
+        # Verify the tee part
+        assert "2>&1" in script_content
+        assert "| tee -a" in script_content
+        assert "'/tmp/path with spaces and $meta/orb_slam3_wrapper.log'" in script_content
+
+        assert getattr(wrapper_action, 'shell', False) == False
+
+        # Subprocess probe to verify pipefail
+        test_script = "bash", "-o", "pipefail", "-c", "false 2>&1 | tee /dev/null"
+        result = subprocess.run(test_script, capture_output=True)
+        assert result.returncode != 0
 
     finally:
         sys.path.pop(0)

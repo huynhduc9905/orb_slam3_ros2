@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -270,28 +271,35 @@ def _setup(context, *args, **kwargs):
 
     wrapper_log_path = str(Path(artifact_dir) / "orb_slam3_wrapper.log")
 
+    wrapper_cmd_parts = [
+        "ros2", "run", "orb_slam3_wrapper", "orb_slam3_wrapper_node",
+        "--ros-args", "-r", "__node:=orb_slam3_wrapper",
+        "-p", "use_sim_time:=true",
+        "-p", f"left_image_topic:={profile['camera']['left_image']}",
+        "-p", f"right_image_topic:={profile['camera']['right_image']}",
+        "-p", f"left_info_topic:={profile['camera']['left_info']}",
+        "-p", f"right_info_topic:={profile['camera']['right_info']}",
+        "-p", "base_frame:=base_link",
+        "-p", "map_frame:=orb_map",
+        "-p", f"settings_file:={settings_file}",
+    ]
+    wrapper_cmd_quoted = " ".join(shlex.quote(p) for p in wrapper_cmd_parts)
+    script_content = f"{wrapper_cmd_quoted} 2>&1 | tee -a {shlex.quote(wrapper_log_path)}"
+
     actions.append(
         ExecuteProcess(
             cmd=[
-                "sh",
+                "bash",
+                "-o",
+                "pipefail",
                 "-c",
-                f"ros2 run orb_slam3_wrapper orb_slam3_wrapper_node --ros-args "
-                f"-p use_sim_time:=true "
-                f"-p left_image_topic:={profile["camera"]["left_image"]} "
-                f"-p right_image_topic:={profile["camera"]["right_image"]} "
-                f"-p left_info_topic:={profile["camera"]["left_info"]} "
-                f"-p right_info_topic:={profile["camera"]["right_info"]} "
-                f"-p base_frame:=base_link "
-                f"-p map_frame:=orb_map "
-                f"-p settings_file:={settings_file} "
-                f"2>&1 | tee -a \"{wrapper_log_path}\""
+                script_content
             ],
             name="orb_slam3_wrapper",
             output="screen",
-            shell=True,
+            shell=False,
         )
     )
-
 
     # Lidar mapper
     if benchmark_mode in ("off", "full_stack"):
