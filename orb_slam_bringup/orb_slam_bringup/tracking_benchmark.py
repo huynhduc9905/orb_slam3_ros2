@@ -200,9 +200,14 @@ def main(args: Sequence[str] | None = None) -> int:
             selected = select_stress_point(benchmark_results, parsed.source_camera_hz)
             print(json.dumps(selected.as_dict(), indent=2))
             return 0
+        except ValueError as exc:
+            sys.stderr.write(f"Error selecting stress point: {exc}\n")
+            if str(exc) == "ORB-only saturation point was not found":
+                return 1
+            return 2
         except Exception as exc:
             sys.stderr.write(f"Error selecting stress point: {exc}\n")
-            return 1
+            return 2
 
     elif parsed.subcommand == "compare":
         try:
@@ -232,3 +237,7 @@ def main(args: Sequence[str] | None = None) -> int:
             return 2
 
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

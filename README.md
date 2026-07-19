@@ -188,6 +188,27 @@ dimensions and revision counts are not required — multi-threaded ORB-SLAM3
 is non-deterministic and produces different but equally-valid maps run to
 run.
 
+## Tracking performance benchmark
+
+```bash
+source install/setup.bash
+tools/run_tracking_performance_benchmark.sh \
+  --bag /home/duc/robot/20260713_152907 \
+  --source-camera-hz 30 \
+  --start-rate 2 \
+  --max-rate 8
+```
+
+The runner:
+- Starts with ORB-only at 2x and advances in 1x increments.
+- Selects the first ORB-only rate below `source-camera-hz * playback_rate`.
+- Runs full stack at exactly that selected rate, with dashboard disabled in both modes.
+- Writes per-run `tracking_benchmark.json` plus top-level `comparison.json`.
+- Passes only at 80% or more of baseline FPS.
+- Fails for invalid probe results or if no saturation point is found through `--max-rate`.
+
+For example, if the baseline is 80 FPS at 3x, the full stack must achieve at least 64 FPS to pass.
+
 ## Scan and dashboard lifecycle
 
 - **Committed** scans enter the occupancy grid. They are placed while ORB

@@ -96,3 +96,11 @@ def test_benchmark_launch_keeps_dashboard_disabled_by_mode():
     text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
     assert "benchmark modes do not start the dashboard" in text
 
+def test_readme_documents_tracking_performance_benchmark():
+    readme = Path(__file__).resolve().parents[2] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert "run_tracking_performance_benchmark.sh" in text
+    assert "80%" in text
+    assert "first ORB-only rate" in text
+    assert "tracking_benchmark.json" in text
+

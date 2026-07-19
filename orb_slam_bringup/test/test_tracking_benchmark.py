@@ -1,5 +1,8 @@
 from pathlib import Path
 import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 import pytest
 
@@ -113,6 +116,13 @@ def test_select_stress_point_raises_when_result_invalid():
         select_stress_point([result(2.0, 60.0, invalid_reason="orb_never_initialized")], source_camera_hz=30.0)
 
 
+def test_cli_select_returns_invalid_input_status_for_invalid_result(tmp_path: Path):
+    invalid = tmp_path / "invalid.json"
+    result(2.0, 60.0, invalid_reason="orb_never_initialized").write(invalid)
+
+    assert main(["select", "--source-camera-hz", "30", "--result", str(invalid)]) == 2
+
+
 def test_compare_full_stack_differing_rates_raises():
     baseline = result(2.0, 60.0)
     full_stack = BenchmarkResult("full_stack", 3.0, 10.0, 600, 60.0, 600, 1.0, True, None)
@@ -158,6 +168,23 @@ def test_runner_uses_orb_only_sweep_and_full_stack_comparison():
     assert "--source-camera-hz" in text
     assert "--max-rate" in text
 
+
+def test_runner_handles_no_saturation_and_uses_compare_cli_flags():
+    text = RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "set +e\n    SELECT_OUT=$(python3 -m orb_slam_bringup.tracking_benchmark select" in text
+    assert "SELECT_STATUS=$?" in text
+    assert 'if [ "$SELECT_STATUS" -eq 1 ]; then' in text
+    assert '--baseline "$RESULT_FILE"' in text
+    assert '--full-stack "$FULL_STACK_RESULT_FILE"' in text
+    assert '[ "$SELECTED_RATE" = "-1" ]' in text
+
+
+def test_runner_disables_nounset_while_sourcing_ros_setup():
+    text = RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "set +u\nsource install/setup.bash\nset -u" in text
+
 def test_cli_select_and_compare(tmp_path: Path, capsys):
     res_2x = tmp_path / "orb-2x.json"
     res_3x = tmp_path / "orb-3x.json"
@@ -192,3 +219,28 @@ def test_cli_select_and_compare(tmp_path: Path, capsys):
     ret_comp_err = main(["compare", "--baseline", str(res_3x), "--full-stack", str(full_3x), "--output", str(comp_out)])
     assert ret_comp_err == 2
 
+
+def test_module_entry_point_runs_select_subcommand(tmp_path: Path):
+    selected = tmp_path / "selected.json"
+    result(2.0, 40.0).write(selected)
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orb_slam_bringup.tracking_benchmark",
+            "select",
+            "--source-camera-hz",
+            "30",
+            "--result",
+            str(selected),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["playback_rate"] == 2.0

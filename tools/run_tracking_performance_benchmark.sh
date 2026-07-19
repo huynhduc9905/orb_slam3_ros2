@@ -76,7 +76,11 @@ if [ ! -f "install/setup.bash" ]; then
     echo "Error: install/setup.bash not found. Please build the workspace."
     exit 1
 fi
+
+# Generated colcon setup scripts inspect optional environment variables.
+set +u
 source install/setup.bash
+set -u
 
 
 # Execution
@@ -104,24 +108,30 @@ for RATE in $(seq "$START_RATE" "$MAX_RATE"); do
         exit 1
     fi
     
-    RESULT_PATHS+=("$RESULT_FILE")
+    RESULT_PATHS+=("--result" "$RESULT_FILE")
     
     # Try selecting
+    set +e
     SELECT_OUT=$(python3 -m orb_slam_bringup.tracking_benchmark select \
       --source-camera-hz "${SOURCE_CAMERA_HZ}" \
-      --result "${RESULT_PATHS[@]}")
-      
-    # If the tool prints out valid JSON, grab the playback rate
-    if echo "$SELECT_OUT" | grep -q '"playback_rate":'; then
+      "${RESULT_PATHS[@]}")
+    SELECT_STATUS=$?
+    set -e
+
+    if [ "$SELECT_STATUS" -eq 0 ]; then
         SELECTED_RATE=$(echo "$SELECT_OUT" | python3 -c 'import sys, json; print(json.load(sys.stdin)["playback_rate"])')
         echo "Selection successful: Rate ${SELECTED_RATE}x chosen."
         break
-    else
-        echo "No saturation yet, continuing..."
     fi
+    if [ "$SELECT_STATUS" -eq 1 ]; then
+        echo "No saturation yet, continuing..."
+        continue
+    fi
+    echo "Error: Unable to select a valid stress point." >&2
+    exit "$SELECT_STATUS"
 done
 
-if [ "$SELECTED_RATE" -eq -1 ]; then
+if [ "$SELECTED_RATE" = "-1" ]; then
     echo "Error: Reached --max-rate ($MAX_RATE) without selecting a rate."
     exit 1
 fi
@@ -153,7 +163,7 @@ echo "Running comparison..."
 
 set +e
 python3 -m orb_slam_bringup.tracking_benchmark compare \
-    --orb-only "$RESULT_FILE" \
+    --baseline "$RESULT_FILE" \
     --full-stack "$FULL_STACK_RESULT_FILE" \
     --output "$COMPARISON_FILE"
 COMP_STATUS=$?
