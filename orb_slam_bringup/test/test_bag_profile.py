@@ -81,3 +81,18 @@ def test_bag_replay_forwards_sim_time_to_direct_dashboard():
     text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
     assert '"use_sim_time": "true"' in text
     assert "foxglove_bridge" not in text
+
+
+def test_bag_replay_declares_explicit_tracking_benchmark_modes():
+    text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
+    assert '"benchmark_mode"' in text
+    assert '"benchmark_min_duration_s"' in text
+    assert 'tracking_benchmark_probe' in text
+    assert '"orb_only"' in text
+    assert '"full_stack"' in text
+
+
+def test_benchmark_launch_keeps_dashboard_disabled_by_mode():
+    text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
+    assert "benchmark modes do not start the dashboard" in text
+

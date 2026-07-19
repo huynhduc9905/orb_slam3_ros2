@@ -142,6 +142,15 @@ def _setup(context, *args, **kwargs):
     publish_odom_tf = LaunchConfiguration("publish_odom_tf").perform(context).lower()
     start_dashboard = LaunchConfiguration("start_dashboard").perform(context).lower()
     dashboard_host = LaunchConfiguration("dashboard_host").perform(context)
+    
+    benchmark_mode = LaunchConfiguration("benchmark_mode").perform(context).strip().lower()
+    benchmark_min_duration_s = float(
+        LaunchConfiguration("benchmark_min_duration_s").perform(context)
+    )
+    if benchmark_mode not in ("off", "orb_only", "full_stack"):
+        raise RuntimeError("benchmark_mode must be one of: off, orb_only, full_stack")
+    if benchmark_min_duration_s < 0.0:
+        raise RuntimeError("benchmark_min_duration_s must be nonnegative")
 
     bringup_share = Path(get_package_share_directory("orb_slam_bringup"))
     profile_path = bringup_share / "config" / "tasterobot_bag.yaml"
@@ -281,51 +290,76 @@ def _setup(context, *args, **kwargs):
     )
 
     # Lidar mapper
-    actions.append(
-        Node(
-            package="orb_lidar_mapper",
-            executable="orb_lidar_mapper_node",
-            name="orb_lidar_mapper",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "odom_topic": profile["odometry"]["topic"],
-                    "scan_topic": profile["lidar"]["topic"],
-                    "map_frame": "orb_map",
-                    "base_frame": "base_link",
-                }
-            ],
-            output="screen",
+    if benchmark_mode in ("off", "full_stack"):
+        actions.append(
+            Node(
+                package="orb_lidar_mapper",
+                executable="orb_lidar_mapper_node",
+                name="orb_lidar_mapper",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "odom_topic": profile["odometry"]["topic"],
+                        "scan_topic": profile["lidar"]["topic"],
+                        "map_frame": "orb_map",
+                        "base_frame": "base_link",
+                    }
+                ],
+                output="screen",
+            )
         )
-    )
 
     # Metrics recorder (Task 5): read-only subscribers; flushes on bag-exit Shutdown.
-    actions.append(
-        Node(
-            package="orb_slam_bringup",
-            executable="metrics_recorder",
-            name="metrics_recorder",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "artifact_dir": artifact_dir,
-                    "bag_path": bag_path,
-                    "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
-                    "config_path": str(profile_path),
-                    "repo_dir": str(Path(__file__).resolve().parents[2]),
-                    # Soft expected count for report gates; bag-specific.
-                    # 0 disables strict expected-pairs matching (recorder still counts).
-                    "expected_stereo_pairs": int(
-                        profile.get("bag", {}).get("expected_stereo_pairs", 0)
-                    ),
-                }
-            ],
-            output="screen",
+    if benchmark_mode in ("off", "full_stack"):
+        actions.append(
+            Node(
+                package="orb_slam_bringup",
+                executable="metrics_recorder",
+                name="metrics_recorder",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "artifact_dir": artifact_dir,
+                        "bag_path": bag_path,
+                        "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
+                        "config_path": str(profile_path),
+                        "repo_dir": str(Path(__file__).resolve().parents[2]),
+                        # Soft expected count for report gates; bag-specific.
+                        # 0 disables strict expected-pairs matching (recorder still counts).
+                        "expected_stereo_pairs": int(
+                            profile.get("bag", {}).get("expected_stereo_pairs", 0)
+                        ),
+                    }
+                ],
+                output="screen",
+            )
         )
-    )
+
+    # Tracking benchmark probe (Task 2)
+    if benchmark_mode != "off":
+        actions.append(
+            LogInfo(msg="[bag_replay] benchmark modes do not start the dashboard")
+        )
+        actions.append(
+            Node(
+                package="orb_slam_bringup",
+                executable="tracking_benchmark_probe",
+                name="tracking_benchmark_probe",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "artifact_dir": artifact_dir,
+                        "mode": benchmark_mode,
+                        "playback_rate": float(rate),
+                        "min_duration_s": benchmark_min_duration_s,
+                    }
+                ],
+                output="screen",
+            )
+        )
 
     # Dashboard: custom read-only dashboard_server (no foxglove) when requested.
-    if start_dashboard in ("true", "1", "yes"):
+    if start_dashboard in ("true", "1", "yes") and benchmark_mode == "off":
         dashboard_candidates = [
             bringup_share / "launch" / "dashboard.launch.py",
             Path(__file__).resolve().parent / "dashboard.launch.py",
@@ -437,6 +471,16 @@ def generate_launch_description() -> LaunchDescription:
                 description=(
                     "Tailscale/LAN bind host for dashboard when start_dashboard:=true"
                 ),
+            ),
+            DeclareLaunchArgument(
+                "benchmark_mode",
+                default_value="off",
+                description="Mode for tracking benchmark: off, orb_only, or full_stack",
+            ),
+            DeclareLaunchArgument(
+                "benchmark_min_duration_s",
+                default_value="10.0",
+                description="Minimum tracking duration in seconds for benchmark mode",
             ),
             OpaqueFunction(function=_setup),
         ]
