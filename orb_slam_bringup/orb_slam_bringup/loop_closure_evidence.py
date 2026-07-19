@@ -44,13 +44,14 @@ def evaluate_artifact(artifact_dir: Path) -> dict:
     wrapper_loops = len(metrics.get("loops", []))
     
     # Calculate diagnoses in deterministic order
-    if core_loops == 0 and wrapper_loops == 0:
+    if core_loops == 0:
         evidence["diagnoses"].append("no_core_loop_detected")
     elif core_loops > 0 and wrapper_loops == 0:
         evidence["diagnoses"].append("core_loop_unobserved")
-    elif core_loops > 0 and wrapper_loops > 0:
-        # Check if wrapper loop lacks published rebuild
-        loop_rebuild_missing = False
+
+    # Check if wrapper loop lacks published rebuild
+    loop_rebuild_missing = False
+    if wrapper_loops > 0:
         published_revisions = [rev["graph_revision"] for rev in metrics.get("revisions", []) if rev.get("state") == "PUBLISHED"]
         
         for loop in metrics.get("loops", []):
@@ -61,8 +62,8 @@ def evaluate_artifact(artifact_dir: Path) -> dict:
                     loop_rebuild_missing = True
                     break
                     
-        if loop_rebuild_missing:
-            evidence["diagnoses"].append("loop_rebuild_missing")
+    if loop_rebuild_missing:
+        evidence["diagnoses"].append("loop_rebuild_missing")
             
     if evidence["marker_counts"]["local_mapping_stop"] > evidence["marker_counts"]["local_mapping_release"]:
         evidence["diagnoses"].append("local_mapping_stop_unreleased")
@@ -83,10 +84,22 @@ def main():
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
-        
+
+    import tempfile
+    import os
+
     output_path = args.artifact_dir / "loop_closure_evidence.json"
-    with open(output_path, "w") as f:
-        json.dump(evidence, f, indent=2)
+    
+    fd, tmp_path = tempfile.mkstemp(dir=args.artifact_dir, prefix="loop_closure_evidence_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(evidence, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, output_path)
+    except Exception as e:
+        os.remove(tmp_path)
+        raise
         
     return 0 if evidence["passed"] else 1
 

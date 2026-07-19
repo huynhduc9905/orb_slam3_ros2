@@ -65,3 +65,35 @@ def test_wrapper_loop_lacking_published_rebuild(tmp_path: Path):
     evidence = evaluate_artifact(tmp_path)
     assert "loop_rebuild_missing" in evidence["diagnoses"]
     assert evidence["passed"] is False
+
+def test_atomic_write_creates_file(tmp_path: Path, monkeypatch):
+    from orb_slam_bringup.loop_closure_evidence import main
+    write_metrics(tmp_path, loops=[], revisions=[])
+    (tmp_path / "orb_slam3_wrapper.log").write_text("")
+    monkeypatch.setattr("sys.argv", ["test_loop_closure_evidence", "--artifact-dir", str(tmp_path)])
+    
+    result = main()
+    
+    # Check return code
+    assert result == 1
+    
+    output_file = tmp_path / "loop_closure_evidence.json"
+    assert output_file.exists()
+    
+    with open(output_file, "r") as f:
+        evidence = json.load(f)
+        
+    assert "no_core_loop_detected" in evidence["diagnoses"]
+
+
+def test_independent_diagnoses_multiple_errors(tmp_path: Path):
+    from orb_slam_bringup.loop_closure_evidence import evaluate_artifact
+    # wrapper_loops > 0, so loop_rebuild_missing check will run
+    write_metrics(tmp_path, loops=[{"graph_revision": 4}], revisions=[])
+    # core_loops == 0, so no_core_loop_detected will be added
+    (tmp_path / "orb_slam3_wrapper.log").write_text("")
+    
+    evidence = evaluate_artifact(tmp_path)
+    
+    # Assert exact diagnoses in exact order
+    assert evidence["diagnoses"] == ["no_core_loop_detected", "loop_rebuild_missing"]
