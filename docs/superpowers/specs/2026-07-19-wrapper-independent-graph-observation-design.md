@@ -74,3 +74,19 @@ traffic so it can inspect backend changes after tracking callbacks stop.
 - The focused bringup loop-evidence tests pass.
 - Run the three-trial circle evaluator at rate one. Success requires at least
   two `observed_and_rebuilt` trials.
+
+## Acceptance Result
+
+- **Artifact Path:** `artifacts/circle-loop-evaluation-20260719_215238`
+- **Superproject Commit:** `ae309cacd07f31fc975eaf22495eeee20717b082`
+- **Passed Runs:** 0 / 3
+- **Two-of-Three Gate Passed:** No
+
+### Per-Run Diagnoses:
+- **Run 1:** `core_loop_unobserved` (`passed`: false)
+- **Run 2:** `core_loop_unobserved` (`passed`: false)
+- **Run 3:** `core_loop_unobserved` (`passed`: false)
+
+### Evidence Summary:
+All 3 runs reported `core_loop_unobserved` (0 of 3 runs passed). In each run, vendor ORB-SLAM3 logged `*Loop detected` and stopped/released local mapping, but no canonical loop edge was extracted or published by the wrapper graph observer, and the downstream 2D map rebuild was not triggered.
+
