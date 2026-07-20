@@ -52,7 +52,11 @@ def evaluate_artifact(artifact_dir: Path) -> dict:
     # Check if wrapper loop lacks published rebuild
     loop_rebuild_missing = False
     if wrapper_loops > 0:
-        published_revisions = [rev["graph_revision"] for rev in metrics.get("revisions", []) if rev.get("state") == "PUBLISHED"]
+        published_revisions = [
+            rev["graph_revision"]
+            for rev in metrics.get("map_revisions", [])
+            if rev.get("state") == "PUBLISHED"
+        ]
         
         for loop in metrics.get("loops", []):
             loop_rev = loop.get("graph_revision")
