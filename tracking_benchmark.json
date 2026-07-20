@@ -1,0 +1,11 @@
+{
+  "mode": "orb_only",
+  "playback_rate": 1.0,
+  "wall_duration_s": 0.0,
+  "received_frames": 0,
+  "tracking_fps": 0.0,
+  "ok_frames": 0,
+  "ok_ratio": 0.0,
+  "initialized": false,
+  "invalid_reason": "orb_never_initialized"
+}
