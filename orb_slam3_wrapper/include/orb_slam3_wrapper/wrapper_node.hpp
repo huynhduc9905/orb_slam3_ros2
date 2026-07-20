@@ -36,6 +36,8 @@
 
 namespace orb_slam3_wrapper {
 
+std::size_t canonicalLoopEdgeCountForTest(const ORB_SLAM3::GraphSnapshot& graph);
+
 class WrapperNode final : public rclcpp::Node {
 public:
   explicit WrapperNode(std::unique_ptr<SlamBackend> backend = nullptr);

@@ -54,7 +54,21 @@ bool cameraInfoCalibrationEqual(const sensor_msgs::msg::CameraInfo& lhs,
       lhs.roi.do_rectify == rhs.roi.do_rectify;
 }
 
+std::size_t canonicalLoopEdgeCount(const ORB_SLAM3::GraphSnapshot& graph) {
+  std::set<std::pair<std::uint64_t, std::uint64_t>> edges;
+  for (const auto& keyframe : graph.keyframes) {
+    for (const auto id : keyframe.loop_edge_ids) {
+      edges.emplace(std::min(keyframe.id, id), std::max(keyframe.id, id));
+    }
+  }
+  return edges.size();
+}
+
 }  // namespace
+
+std::size_t canonicalLoopEdgeCountForTest(const ORB_SLAM3::GraphSnapshot& graph) {
+  return canonicalLoopEdgeCount(graph);
+}
 
 WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
 : Node("orb_slam3_wrapper"), backend_(std::move(backend)),
@@ -205,6 +219,10 @@ void WrapperNode::pollGraphChanges() {
   if (!backend_ || !backend_configured_ || last_tracked_.header.frame_id.empty()) return;
   if (!graph_baseline_captured_) {
     previous_graph_ = backend_->graphSnapshot();
+    RCLCPP_INFO(get_logger(),
+                "graph_observation stage=baseline revision=%lu raw_loop_edges=%zu previous_baseline=false",
+                static_cast<unsigned long>(previous_graph_->revision),
+                canonicalLoopEdgeCount(*previous_graph_));
     graph_baseline_captured_ = true;
   }
   if (!backend_->mapChanged()) return;
@@ -343,6 +361,11 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
   keyframe_markers.markers.push_back(keyframe_marker); loop_markers.markers.push_back(loop_marker);
   keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
   const auto evidence = classifyGraphDeltaEvidence(previous_graph_, graph);
+  RCLCPP_INFO(get_logger(),
+              "graph_observation stage=changed revision=%lu raw_loop_edges=%zu previous_baseline=%s extracted_loop_edges=%zu",
+              static_cast<unsigned long>(graph.revision), canonicalLoopEdgeCount(graph),
+              previous_graph_ ? "true" : "false",
+              evidence.loop_edges.size());
   for (const auto type : evidence.event_types) {
     if (type == orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED) continue;
     orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = type;

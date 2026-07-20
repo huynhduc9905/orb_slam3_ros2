@@ -181,6 +181,22 @@ TEST_F(WrapperComponentTest, GraphLoopEdgesAreCanonicalizedAndDeduplicated) {
             orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
 }
 
+TEST_F(WrapperComponentTest, CanonicalLoopEdgeCountDeduplicatesReciprocalEdges) {
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.loop_edge_ids = {10, 30};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.loop_edge_ids = {20};
+  ORB_SLAM3::KeyframeSnapshot third;
+  third.id = 30;
+  third.loop_edge_ids = {20};
+  ORB_SLAM3::GraphSnapshot graph;
+  graph.keyframes = {first, second, third};
+
+  EXPECT_EQ(orb_slam3_wrapper::canonicalLoopEdgeCountForTest(graph), 2u);
+}
+
 TEST_F(WrapperComponentTest, FirstChangedGraphWithLoopEdgeEmitsLoopClosed) {
   auto backend = std::make_unique<FakeBackend>();
   backend->frame = okFrame();
