@@ -169,33 +169,29 @@ def test_wrapper_log_capture_configuration():
             else:
                 resolved_cmd.append(c.perform(context) if hasattr(c, "perform") else str(c))
 
-        assert resolved_cmd[:4] == ["bash", "-o", "pipefail", "-c"]
-        script_content = resolved_cmd[4]
+        assert resolved_cmd[:2] == ["bash", "-c"]
+        script_content = resolved_cmd[2]
 
-        parsed = shlex.split(script_content)
-        assert parsed[0] == "ros2"
-        assert parsed[1] == "run"
-        assert parsed[2] == "orb_slam3_wrapper"
-        assert parsed[3] == "orb_slam3_wrapper_node"
-        
-        assert "__node:=orb_slam3_wrapper" in parsed
-        assert "use_sim_time:=true" in parsed
-        
-        # Verify quotation of settings path
-        settings_idx = next(i for i, arg in enumerate(parsed) if arg.startswith("settings_file:="))
-        assert parsed[settings_idx].startswith("settings_file:=")
-        
-        # Verify the tee part
-        assert "2>&1" in script_content
-        assert "| tee -a" in script_content
+        assert script_content.startswith("exec ros2 run orb_slam3_wrapper orb_slam3_wrapper_node ")
+        assert " > >(tee -a " in script_content
+        assert " 2>&1" in script_content
+        assert "| tee" not in script_content
+        assert "pipefail" not in resolved_cmd
         assert "'/tmp/path with spaces and $meta/orb_slam3_wrapper.log'" in script_content
 
-        assert getattr(wrapper_action, 'shell', False) == False
+        parsed_command = shlex.split(script_content.split(" > >(", 1)[0])
+        assert parsed_command[:5] == [
+            "exec", "ros2", "run", "orb_slam3_wrapper", "orb_slam3_wrapper_node"
+        ]
+        
+        assert "__node:=orb_slam3_wrapper" in parsed_command
+        assert "use_sim_time:=true" in parsed_command
+        
+        # Verify quotation of settings path
+        settings_idx = next(i for i, arg in enumerate(parsed_command) if arg.startswith("settings_file:="))
+        assert parsed_command[settings_idx].startswith("settings_file:=")
 
-        # Subprocess probe to verify pipefail
-        test_script = "bash", "-o", "pipefail", "-c", "false 2>&1 | tee /dev/null"
-        result = subprocess.run(test_script, capture_output=True)
-        assert result.returncode != 0
+        assert getattr(wrapper_action, 'shell', False) == False
 
     finally:
         sys.path.pop(0)

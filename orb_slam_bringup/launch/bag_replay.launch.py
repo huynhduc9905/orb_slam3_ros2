@@ -284,17 +284,13 @@ def _setup(context, *args, **kwargs):
         "-p", f"settings_file:={settings_file}",
     ]
     wrapper_cmd_quoted = " ".join(shlex.quote(p) for p in wrapper_cmd_parts)
-    script_content = f"{wrapper_cmd_quoted} 2>&1 | tee -a {shlex.quote(wrapper_log_path)}"
+    script_content = (
+        f"exec {wrapper_cmd_quoted} > >(tee -a {shlex.quote(wrapper_log_path)}) 2>&1"
+    )
 
     actions.append(
         ExecuteProcess(
-            cmd=[
-                "bash",
-                "-o",
-                "pipefail",
-                "-c",
-                script_content
-            ],
+            cmd=["bash", "-c", script_content],
             name="orb_slam3_wrapper",
             output="screen",
             shell=False,
