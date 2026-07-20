@@ -1,3 +1,3 @@
 [submodule "orb_slam3_vendor/vendor/ORB_SLAM3"]
 	path = orb_slam3_vendor/vendor/ORB_SLAM3
-	url = https://github.com/UZ-SLAMLab/ORB_SLAM3.git
+	url = git@github.com:huynhduc9905/ORB_SLAM3.git
