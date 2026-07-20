@@ -144,6 +144,9 @@ void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPt
   cached = *msg;
   calibration_.reset();
   backend_configured_ = false;
+  graph_baseline_captured_ = false;
+  previous_graph_.reset();
+  last_graph_revision_ = 0;
   failed_calibration_.reset();
 }
 
@@ -157,6 +160,9 @@ void WrapperNode::setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
   if (!changed) return;
   calibration_.reset();
   backend_configured_ = false;
+  graph_baseline_captured_ = false;
+  previous_graph_.reset();
+  last_graph_revision_ = 0;
   failed_calibration_.reset();
 }
 
