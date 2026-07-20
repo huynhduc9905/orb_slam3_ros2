@@ -35,6 +35,11 @@ if(BUILD_TESTING)
   target_compile_definitions(ORB_SLAM3 PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
   ament_add_gtest(vendor_link_test test/vendor_link_test.cpp)
   target_link_libraries(vendor_link_test ORB_SLAM3::ORB_SLAM3)
+  
+  ament_add_gtest(loop_revisit_policy_test test/loop_revisit_policy_test.cpp)
+  target_link_libraries(loop_revisit_policy_test ORB_SLAM3::ORB_SLAM3)
+  set_tests_properties(loop_revisit_policy_test PROPERTIES TIMEOUT 10)
+
   ament_add_gtest(snapshot_value_test test/snapshot_value_test.cpp)
   target_compile_definitions(snapshot_value_test PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
   target_link_libraries(snapshot_value_test ORB_SLAM3::ORB_SLAM3)
