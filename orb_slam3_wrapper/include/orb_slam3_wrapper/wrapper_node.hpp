@@ -103,6 +103,7 @@ private:
   orb_slam3_msgs::msg::TrackingEvent last_event_;
   std::size_t graph_publish_count_{0};
   std::size_t event_publish_count_{0};
+  bool graph_baseline_captured_{false};
   std::optional<ORB_SLAM3::GraphSnapshot> previous_graph_;
   std::unique_ptr<LatestImageWorker> image_worker_;
 };

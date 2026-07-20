@@ -197,6 +197,10 @@ void WrapperNode::processStereoForTest(const Image& left, const Image& right) {
 
 void WrapperNode::pollGraphChanges() {
   if (!backend_ || !backend_configured_ || last_tracked_.header.frame_id.empty()) return;
+  if (!graph_baseline_captured_) {
+    previous_graph_ = backend_->graphSnapshot();
+    graph_baseline_captured_ = true;
+  }
   if (!backend_->mapChanged()) return;
   const auto graph = backend_->graphSnapshot();
   if (graph.revision != last_graph_revision_) publishGraph(graph, last_tracked_.header);

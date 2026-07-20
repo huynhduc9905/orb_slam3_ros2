@@ -181,6 +181,46 @@ TEST_F(WrapperComponentTest, GraphLoopEdgesAreCanonicalizedAndDeduplicated) {
             orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
 }
 
+TEST_F(WrapperComponentTest, FirstChangedGraphWithLoopEdgeEmitsLoopClosed) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame();
+  backend->graph.active_map_id = 17;
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+
+  sensor_msgs::msg::Image image;
+  image.header.frame_id = "left_optical";
+  image.height = image.width = 2;
+  image.encoding = "mono8";
+  image.step = 2;
+  image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  rclcpp::spin_some(node);
+  EXPECT_EQ(node->graphPublishCountForTest(), 0u);
+  EXPECT_EQ(node->eventPublishCountForTest(), 1u);
+
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.map_id = 17;
+  first.loop_edge_ids = {10};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.map_id = 17;
+  second.loop_edge_ids = {20};
+  backend_ptr->graph.revision = 1;
+  backend_ptr->graph.active_map_id = 17;
+  backend_ptr->graph.keyframes = {first, second};
+  backend_ptr->changed = true;
+
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
+  EXPECT_EQ(node->lastTrackingEventForTest().type,
+            orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
+  EXPECT_EQ(node->eventPublishCountForTest(), 2u);
+}
+
 TEST_F(WrapperComponentTest, GraphPublisherIsReliableTransientLocalAndEventsDepthHundred) {
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::make_unique<FakeBackend>());
   const auto graph = node->get_publishers_info_by_topic("/orb_slam3/graph_snapshot");
