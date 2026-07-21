@@ -35,6 +35,7 @@
 #include "orb_slam3_wrapper/calibration.hpp"
 #include "orb_slam3_wrapper/pose_conversion.hpp"
 #include "orb_slam3_wrapper/latest_image_worker.hpp"
+#include "orb_slam3_wrapper/serial_publish_worker.hpp"
 
 namespace orb_slam3_wrapper {
 
@@ -111,6 +112,12 @@ private:
   bool graph_baseline_captured_{false};
   std::optional<ORB_SLAM3::GraphSnapshot> previous_graph_;
   std::unique_ptr<LatestImageWorker> image_worker_;
+  // Publish workers keep blocking reliable-QoS publish() calls off the ORB
+  // tracking / graph-timer spin thread. graph_publish_worker_ coalesces
+  // (latest-wins) the graph_snapshot/path/marker bundle; event_publish_worker_
+  // preserves discrete tracking events in FIFO order.
+  std::unique_ptr<SerialPublishWorker> graph_publish_worker_;
+  std::unique_ptr<SerialPublishWorker> event_publish_worker_;
 
   // Read-only diagnostic (param-gated): measures how much ORB-SLAM3 moves
   // keyframe camera poses between successive graph polls, independent of the

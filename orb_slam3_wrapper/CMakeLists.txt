@@ -21,7 +21,7 @@ find_package(message_filters REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(tf2_msgs REQUIRED)
 
-add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/graph_semantics.cpp src/latest_image_worker.cpp src/wrapper_node.cpp)
+add_library(orb_slam3_wrapper_core src/calibration.cpp src/pose_conversion.cpp src/backend.cpp src/graph_semantics.cpp src/latest_image_worker.cpp src/serial_publish_worker.cpp src/wrapper_node.cpp)
 target_include_directories(orb_slam3_wrapper_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
