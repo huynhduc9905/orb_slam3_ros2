@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { Eye, EyeOff, Maximize, WifiOff, ZoomIn, ZoomOut } from "lucide-react";
 
-import type { DashboardState } from "../types";
+import type { DashboardState, OccupancyGrid } from "../types";
 import {
   isAllUnknown,
   mapWorldBounds,
@@ -94,7 +94,7 @@ export function MapView({ state }: MapViewProps) {
   const kfGfxRef = useRef<Graphics | null>(null);
   const robotGfxRef = useRef<Graphics | null>(null);
 
-  const lastMapRev = useRef<bigint | null>(null);
+  const lastRenderedMap = useRef<OccupancyGrid | null>(null);
   const layersRef = useRef<LayerVisibility>({ ...DEFAULT_LAYERS });
   const [layers, setLayers] = useState<LayerVisibility>({ ...DEFAULT_LAYERS });
   const dragRef = useRef<{ x: number; y: number } | null>(null);
@@ -248,17 +248,23 @@ export function MapView({ state }: MapViewProps) {
     };
   }, [zoomBy]);
 
-  // Rebuild occupancy texture only when mapRevision changes
+  // Rebuild occupancy texture whenever a new grid arrives.
+  // Keyed on the grid object identity (the store replaces `state.map` only when
+  // a fresh OccupancyGrid is received), NOT on mapRevision. The grid and the
+  // revision counter travel on separate topics, so gating on the counter could
+  // drop the final corrected grid if it landed after its revision was already
+  // consumed — leaving a stale (pre-loop-closure) texture on screen.
   useEffect(() => {
     if (!readyRef.current || !mapSpriteRef.current) return;
     if (!state.map || state.map.info.width <= 0) return;
-    if (lastMapRev.current === state.mapRevision && lastMapRev.current !== null) {
-      // Still allow first paint when revision is 0 and map just arrived
+    // Same grid object already rasterized — nothing new to draw. Path/scan/robot
+    // layer updates keep the same `state.map` reference, so they no-op here.
+    if (lastRenderedMap.current === state.map) {
       if (mapSpriteRef.current.texture && mapSpriteRef.current.texture !== Texture.EMPTY) {
         return;
       }
     }
-    lastMapRev.current = state.mapRevision;
+    lastRenderedMap.current = state.map;
     const { width, height, data } = occupancyToRGBA(state.map);
     if (width <= 0 || height <= 0) return;
 
@@ -294,7 +300,7 @@ export function MapView({ state }: MapViewProps) {
     // After flip in image, sprite local y grows up in world when world.scale.y is negative
     // With world.scale.y = -s, sprite at minY with height positive works with texture flip.
     fitMap();
-  }, [state.map, state.mapRevision, fitMap]);
+  }, [state.map, fitMap]);
 
   // Update path / scan / edge / robot graphics independently
   useEffect(() => {
