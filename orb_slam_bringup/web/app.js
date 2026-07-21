@@ -12,6 +12,12 @@ const canvases = {
   corrected: el("corrected"),
   loopgraph: el("loopgraph"),
 };
+const chartCanvases = {
+  trackHz: el("chartTrackHz"),
+  odomHz: el("chartOdomHz"),
+  kp: el("chartKp"),
+  loops: el("chartLoops"),
+};
 const mapCtx = canvases.map.getContext("2d");
 
 let mapImg = null;
@@ -20,6 +26,28 @@ let requestedRevision = -1;
 let loadedRevision = -1;
 let mapRequestToken = 0;
 let lastState = null;
+let activeTab = "map";
+
+// ── charts history (client-side rolling buffers, ~15 Hz poll cadence) ───────
+const CHART_HISTORY_MAX = 450; // ~30s at 15 Hz
+const history = {
+  t: [],
+  trackHz: [],
+  odomHz: [],
+  kp: [],
+  loops: [],
+};
+function pushHistory(st) {
+  const t = st.tracking || {};
+  history.t.push(performance.now());
+  history.trackHz.push(t.hz ?? 0);
+  history.odomHz.push((st.odom && st.odom.hz) || 0);
+  history.kp.push(t.keypoints || 0);
+  history.loops.push((st.graph && st.graph.loops) ? st.graph.loops.length : 0);
+  while (history.t.length > CHART_HISTORY_MAX) {
+    for (const k of Object.keys(history)) history[k].shift();
+  }
+}
 
 // ── canvas sizing (DPR-aware) ────────────────────────────────────────────────
 function sizeCanvas(canvas) {
@@ -34,6 +62,7 @@ function sizeCanvas(canvas) {
 }
 function resizeAll() {
   for (const c of Object.values(canvases)) sizeCanvas(c);
+  for (const c of Object.values(chartCanvases)) sizeCanvas(c);
   draw();
 }
 window.addEventListener("resize", resizeAll);
@@ -182,22 +211,101 @@ function drawPanel(canvas, opts) {
   ctx.fillStyle = "#64748b"; ctx.font = "11px system-ui"; ctx.fillText("1 m", 12, H - 16);
 }
 
-// ── draw everything from lastState ────────────────────────────────────────────
-function draw() {
-  drawMap();
-  const st = lastState || {};
-  const odom = st.odom || {};
-  const orb = st.orb || {};
-  const graph = st.graph || {};
-  drawPanel(canvases.odom, { points: odom.trail || [], pose: odom.pose, color: "#facc15", poseColor: "#facc15" });
-  drawPanel(canvases.orb, { points: orb.trail || [], pose: orb.pose, color: "#a78bfa", poseColor: "#a78bfa" });
-  drawPanel(canvases.corrected, {
-    points: (st.paths && st.paths.corrected) || [],
-    pose: (st.paths && st.paths.corrected && st.paths.corrected.length) ? st.paths.corrected[st.paths.corrected.length - 1] : null,
-    color: "#38bdf8", poseColor: "#38bdf8",
-  });
-  drawPanel(canvases.loopgraph, { nodes: graph.keyframes || [], edges: graph.loops || [], nodeColor: "#22d3ee" });
+// ── line chart panel (time-series, self-scaling to data range) ──────────────
+function drawLineChart(canvas, values, opts) {
+  opts = opts || {};
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = "#0b0f14";
+  ctx.fillRect(0, 0, W, H);
+  if (!values || values.length < 2) {
+    ctx.fillStyle = "#334155"; ctx.font = "13px system-ui";
+    ctx.fillText("waiting…", 10, 20);
+    return;
+  }
+  const pad = { l: 34, r: 8, t: 8, b: 8 };
+  const plotW = Math.max(1, W - pad.l - pad.r);
+  const plotH = Math.max(1, H - pad.t - pad.b);
+  let minV = Math.min(...values), maxV = Math.max(...values);
+  if (opts.minZero) minV = Math.min(0, minV);
+  if (maxV - minV < 1e-6) { maxV = minV + 1; }
+  const yFor = (v) => pad.t + plotH - ((v - minV) / (maxV - minV)) * plotH;
+  const xFor = (i) => pad.l + (i / (values.length - 1)) * plotW;
+
+  // gridlines + labels (min/mid/max)
+  ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 1; ctx.font = "10px system-ui"; ctx.fillStyle = "#64748b";
+  for (const frac of [0, 0.5, 1]) {
+    const v = minV + frac * (maxV - minV);
+    const y = yFor(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillText(v.toFixed(opts.decimals ?? 0), 2, y + 3);
+  }
+
+  // optional target line (e.g. 30 Hz)
+  if (typeof opts.target === "number" && opts.target >= minV && opts.target <= maxV) {
+    ctx.strokeStyle = "#334155"; ctx.setLineDash([4, 3]);
+    const y = yFor(opts.target);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.strokeStyle = opts.color || "#38bdf8"; ctx.lineWidth = 1.75;
+  ctx.beginPath();
+  values.forEach((v, i) => { const x = xFor(i), y = yFor(v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke();
+
+  // fill under last point marker
+  const lastX = xFor(values.length - 1), lastY = yFor(values[values.length - 1]);
+  ctx.fillStyle = opts.color || "#38bdf8";
+  ctx.beginPath(); ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2); ctx.fill();
 }
+
+function drawCharts() {
+  drawLineChart(chartCanvases.trackHz, history.trackHz, { color: "#38bdf8", minZero: true, decimals: 1, target: 30 });
+  drawLineChart(chartCanvases.odomHz, history.odomHz, { color: "#facc15", minZero: true, decimals: 1 });
+  drawLineChart(chartCanvases.kp, history.kp, { color: "#a78bfa", minZero: true, decimals: 0 });
+  drawLineChart(chartCanvases.loops, history.loops, { color: "#22d3ee", minZero: true, decimals: 0 });
+  const last = (arr) => (arr.length ? arr[arr.length - 1] : 0);
+  el("chartTrackHzNow").textContent = last(history.trackHz).toFixed(1);
+  el("chartOdomHzNow").textContent = last(history.odomHz).toFixed(1);
+  el("chartKpNow").textContent = last(history.kp);
+  el("chartLoopsNow").textContent = last(history.loops);
+}
+
+function draw() {
+  if (activeTab === "map") {
+    drawMap();
+    drawCharts();
+  } else {
+    const st = lastState || {};
+    const odom = st.odom || {};
+    const orb = st.orb || {};
+    const graph = st.graph || {};
+    drawPanel(canvases.odom, { points: odom.trail || [], pose: odom.pose, color: "#facc15", poseColor: "#facc15" });
+    drawPanel(canvases.orb, { points: orb.trail || [], pose: orb.pose, color: "#a78bfa", poseColor: "#a78bfa" });
+    drawPanel(canvases.corrected, {
+      points: (st.paths && st.paths.corrected) || [],
+      pose: (st.paths && st.paths.corrected && st.paths.corrected.length) ? st.paths.corrected[st.paths.corrected.length - 1] : null,
+      color: "#38bdf8", poseColor: "#38bdf8",
+    });
+    drawPanel(canvases.loopgraph, { nodes: graph.keyframes || [], edges: graph.loops || [], nodeColor: "#22d3ee" });
+  }
+}
+
+// ── tab switching ────────────────────────────────────────────────────────────
+function setActiveTab(tab) {
+  activeTab = tab;
+  const mapTab = tab === "map";
+  el("tab-map").classList.toggle("active", mapTab);
+  el("tab-map").setAttribute("aria-selected", String(mapTab));
+  el("tab-charts").classList.toggle("active", !mapTab);
+  el("tab-charts").setAttribute("aria-selected", String(!mapTab));
+  el("view-map").hidden = !mapTab;
+  el("view-charts").hidden = mapTab;
+  resizeAll();
+}
+el("tab-map").addEventListener("click", () => setActiveTab("map"));
+el("tab-charts").addEventListener("click", () => setActiveTab("charts"));
 
 // ── status / events UI ────────────────────────────────────────────────────────
 function trackClass(state) {
@@ -250,6 +358,7 @@ function applyState(st) {
   el("rebuild").textContent = rev.state === "BUILDING" ? "BUILDING" : (rev.state === "FAILED" ? "FAILED" : "");
   el("waiting").style.display = st.map && st.map.width > 0 ? "none" : "flex";
   maybeReloadMap(st.map, rev.map_revision);
+  pushHistory(st);
   draw();
   renderEvents(st.events);
 }
