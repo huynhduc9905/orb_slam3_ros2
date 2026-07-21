@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <opencv2/core/mat.hpp>
@@ -70,6 +73,15 @@ void setInfo(const std::shared_ptr<orb_slam3_wrapper::WrapperNode>& node) {
   node->setCameraInfoForTest(info(), info(true));
 }
 
+bool spinUntil(const std::shared_ptr<orb_slam3_wrapper::WrapperNode>& node,
+               const std::function<bool()>& ready) {
+  for (int i = 0; i < 20 && !ready(); ++i) {
+    rclcpp::spin_some(node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return ready();
+}
+
 class WrapperComponentTest : public ::testing::Test {
 protected:
   static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
@@ -111,9 +123,7 @@ TEST_F(WrapperComponentTest, FakeOkFramePublishesIdentityAnchoredTrackedFrame) {
 TEST_F(WrapperComponentTest, MapChangePublishesOneSnapshotAndConservativeEvent) {
   auto backend = std::make_unique<FakeBackend>();
   backend->frame = okFrame();
-  backend->changed = true;
-  backend->graph.revision = 4;
-  backend->graph.active_map_id = 17;
+  auto* backend_ptr = backend.get();
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
   setInfo(node);
 
@@ -126,28 +136,157 @@ TEST_F(WrapperComponentTest, MapChangePublishesOneSnapshotAndConservativeEvent) 
   image.data = {0, 0, 0, 0};
   node->processStereoForTest(image, image);
 
-  EXPECT_EQ(node->graphPublishCountForTest(), 1u);
+  EXPECT_EQ(node->graphPublishCountForTest(), 0u);
+  backend_ptr->graph.revision = 4;
+  backend_ptr->graph.active_map_id = 17;
+  backend_ptr->changed = true;
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
   EXPECT_EQ(node->lastGraphSnapshotForTest().revision, 4u);
-  ASSERT_EQ(node->eventPublishCountForTest(), 1u);
-  EXPECT_EQ(node->lastTrackingEventForTest().type,
-            orb_slam3_msgs::msg::TrackingEvent::INITIALIZED);
 }
 
 TEST_F(WrapperComponentTest, GraphLoopEdgesAreCanonicalizedAndDeduplicated) {
   auto backend = std::make_unique<FakeBackend>();
-  backend->frame = okFrame(); backend->changed = true; backend->graph.revision = 8;
-  ORB_SLAM3::KeyframeSnapshot first; first.id = 20; first.map_id = 17; first.loop_edge_ids = {10};
-  ORB_SLAM3::KeyframeSnapshot second; second.id = 10; second.map_id = 17; second.loop_edge_ids = {20};
-  backend->graph.keyframes = {first, second};
+  backend->frame = okFrame();
+  backend->graph.revision = 1;
+  backend->changed = true;
+  auto* backend_ptr = backend.get();
   auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
   setInfo(node);
+
   sensor_msgs::msg::Image image;
-  image.header.frame_id = "left_optical"; image.height = image.width = 2;
-  image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
+  image.header.frame_id = "left_optical";
+  image.height = image.width = 2;
+  image.encoding = "mono8";
+  image.step = 2;
+  image.data = {0, 0, 0, 0};
   node->processStereoForTest(image, image);
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
+
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.map_id = 17;
+  first.loop_edge_ids = {10};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.map_id = 17;
+  second.loop_edge_ids = {20};
+  backend_ptr->graph.revision = 2;
+  backend_ptr->graph.keyframes = {first, second};
+  backend_ptr->changed = true;
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 2u; }));
   ASSERT_EQ(node->lastGraphSnapshotForTest().loop_edges.size(), 1u);
   EXPECT_EQ(node->lastGraphSnapshotForTest().loop_edges[0].from_id, 10u);
   EXPECT_EQ(node->lastGraphSnapshotForTest().loop_edges[0].to_id, 20u);
+  EXPECT_EQ(node->lastTrackingEventForTest().type,
+            orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
+}
+
+TEST_F(WrapperComponentTest, CanonicalLoopEdgeCountDeduplicatesReciprocalEdges) {
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.loop_edge_ids = {10, 30};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.loop_edge_ids = {20};
+  ORB_SLAM3::KeyframeSnapshot third;
+  third.id = 30;
+  third.loop_edge_ids = {20};
+  ORB_SLAM3::GraphSnapshot graph;
+  graph.keyframes = {first, second, third};
+
+  EXPECT_EQ(orb_slam3_wrapper::canonicalLoopEdgeCountForTest(graph), 2u);
+}
+
+TEST_F(WrapperComponentTest, FirstChangedGraphWithLoopEdgeEmitsLoopClosed) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame();
+  backend->graph.active_map_id = 17;
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+
+  sensor_msgs::msg::Image image;
+  image.header.frame_id = "left_optical";
+  image.height = image.width = 2;
+  image.encoding = "mono8";
+  image.step = 2;
+  image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  rclcpp::spin_some(node);
+  EXPECT_EQ(node->graphPublishCountForTest(), 0u);
+  EXPECT_EQ(node->eventPublishCountForTest(), 1u);
+
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.map_id = 17;
+  first.loop_edge_ids = {10};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.map_id = 17;
+  second.loop_edge_ids = {20};
+  backend_ptr->graph.revision = 1;
+  backend_ptr->graph.active_map_id = 17;
+  backend_ptr->graph.keyframes = {first, second};
+  backend_ptr->changed = true;
+
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
+  EXPECT_EQ(node->lastTrackingEventForTest().type,
+            orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
+  EXPECT_EQ(node->eventPublishCountForTest(), 2u);
+}
+
+TEST_F(WrapperComponentTest, ReconfigurationResetsGraphObservationSession) {
+  auto backend = std::make_unique<FakeBackend>();
+  backend->frame = okFrame();
+  auto* backend_ptr = backend.get();
+  auto node = std::make_shared<orb_slam3_wrapper::WrapperNode>(std::move(backend));
+  setInfo(node);
+
+  sensor_msgs::msg::Image image;
+  image.header.frame_id = "left_optical";
+  image.height = image.width = 2;
+  image.encoding = "mono8";
+  image.step = 2;
+  image.data = {0, 0, 0, 0};
+  node->processStereoForTest(image, image);
+
+  backend_ptr->graph.revision = 9;
+  backend_ptr->graph.active_map_id = 17;
+  backend_ptr->changed = true;
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
+
+  auto changed_left = info();
+  changed_left.width = 847;
+  auto changed_right = info(true);
+  changed_right.width = 847;
+  node->setCameraInfoForTest(changed_left, changed_right);
+  backend_ptr->changed = false;
+  backend_ptr->graph.revision = 0;
+  backend_ptr->graph.active_map_id = 23;
+  backend_ptr->graph.keyframes.clear();
+  node->processStereoForTest(image, image);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  rclcpp::spin_some(node);
+  EXPECT_EQ(node->graphPublishCountForTest(), 1u);
+
+  ORB_SLAM3::KeyframeSnapshot first;
+  first.id = 20;
+  first.map_id = 23;
+  first.loop_edge_ids = {10};
+  ORB_SLAM3::KeyframeSnapshot second;
+  second.id = 10;
+  second.map_id = 23;
+  second.loop_edge_ids = {20};
+  backend_ptr->graph.revision = 9;
+  backend_ptr->graph.keyframes = {first, second};
+  backend_ptr->changed = true;
+
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 2u; }));
+  EXPECT_EQ(node->lastGraphSnapshotForTest().revision, 9u);
+  EXPECT_EQ(node->lastTrackingEventForTest().type,
+            orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED);
 }
 
 TEST_F(WrapperComponentTest, GraphPublisherIsReliableTransientLocalAndEventsDepthHundred) {
@@ -201,6 +340,7 @@ TEST_F(WrapperComponentTest, ValidCalibrationConfiguresBackendExactlyOnceAndCohe
   sensor_msgs::msg::Image image; image.header.frame_id = "left_optical";
   image.height = image.width = 2; image.encoding = "mono8"; image.step = 2; image.data = {0, 0, 0, 0};
   node->processStereoForTest(image, image);
+  ASSERT_TRUE(spinUntil(node, [&] { return node->graphPublishCountForTest() == 1u; }));
   node->processStereoForTest(image, image);
   EXPECT_EQ(backend_ptr->configure_calls, 1);
   EXPECT_EQ(node->lastTrackedFrameForTest().graph_revision, 9u);

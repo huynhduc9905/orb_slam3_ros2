@@ -188,6 +188,44 @@ dimensions and revision counts are not required — multi-threaded ORB-SLAM3
 is non-deterministic and produces different but equally-valid maps run to
 run.
 
+## Tracking performance benchmark
+
+```bash
+source install/setup.bash
+tools/run_tracking_performance_benchmark.sh \
+  --bag /home/duc/robot/20260713_152907 \
+  --source-camera-hz 30 \
+  --start-rate 2 \
+  --max-rate 8
+```
+
+The runner:
+- Starts with ORB-only at 2x and advances in 1x increments.
+- Selects the first ORB-only rate below `source-camera-hz * playback_rate`.
+- Runs full stack at exactly that selected rate, with dashboard disabled in both modes.
+- Writes per-run `tracking_benchmark.json` plus top-level `comparison.json`.
+- Passes only at 80% or more of baseline FPS.
+- Fails for invalid probe results or if no saturation point is found through `--max-rate`.
+
+For example, if the baseline is 80 FPS at 3x, the full stack must achieve at least 64 FPS to pass.
+
+## Circle loop closure evaluation
+
+```bash
+source install/setup.bash
+tools/run_circle_loop_closure_evaluation.sh \
+  --bag /home/duc/robot/bag/circle-loop \
+  --output "$PWD/artifacts/circle-eval" \
+  [--domain 79]
+```
+
+The runner:
+- Uses `rate:=1` and `benchmark_mode:=off` with the dashboard disabled.
+- Executes three independent, fully-isolated runs (using `ROS_DOMAIN_ID=DOMAIN`, `DOMAIN+1`, `DOMAIN+2`).
+- Evaluates the structural evidence for loop closures (`evaluate_artifact`) and diagnoses missing closures, absent internal rebuilds, or dropped messages.
+- Atomically writes `summary.json`.
+- Fails unless at least two out of three runs pass (`passed_runs >= 2`), acknowledging the underlying non-determinism in multi-threaded ORB-SLAM3.
+
 ## Scan and dashboard lifecycle
 
 - **Committed** scans enter the occupancy grid. They are placed while ORB

@@ -78,6 +78,7 @@ class MapRebuilder {
   void requestRebuild(std::shared_ptr<const TrajectoryRevision> trajectory,
                       std::shared_ptr<const ScanArchive> scans);
   std::shared_ptr<const MapSnapshot> current() const;
+  InsertStats cumulativeInsertStats() const;
   MapRebuilderTestState testState() const;
 
  private:

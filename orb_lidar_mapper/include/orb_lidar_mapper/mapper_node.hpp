@@ -15,6 +15,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -26,6 +27,7 @@
 #include <orb_slam3_msgs/msg/tracked_frame.hpp>
 #include <orb_slam3_msgs/msg/tracking_event.hpp>
 
+#include "orb_lidar_mapper/imu_yaw_buffer.hpp"
 #include "orb_lidar_mapper/map_rebuilder.hpp"
 #include "orb_lidar_mapper/scan_deskewer.hpp"
 #include "orb_lidar_mapper/trajectory_store.hpp"
@@ -50,6 +52,7 @@ private:
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
   void onOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg);
+  void onImu(sensor_msgs::msg::Imu::ConstSharedPtr msg);
   void onTrackedFrame(orb_slam3_msgs::msg::TrackedFrame::ConstSharedPtr msg);
   void onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstSharedPtr msg);
   void onTrackingEvent(orb_slam3_msgs::msg::TrackingEvent::ConstSharedPtr msg);
@@ -68,6 +71,7 @@ private:
 
   // ── Parameters ────────────────────────────────────────────────────────────
   std::string odom_topic_;
+  std::string imu_topic_;
   std::string scan_topic_;
   std::string tracked_frame_topic_;
   std::string graph_snapshot_topic_;
@@ -77,8 +81,14 @@ private:
   std::string base_frame_;
   double wheel_retention_s_;
   double wheel_max_gap_ms_;
+  bool enable_imu_deskew_;
+  double imu_retention_s_;
+  double imu_max_gap_ms_;
   double resolution_m_;
   double usable_range_m_;
+  double hit_range_max_m_;
+  double hit_log_odds_;
+  double miss_log_odds_;
   double max_roll_pitch_deg_;
   double max_height_delta_m_;
   double max_scan_yaw_change_rad_;
@@ -90,6 +100,7 @@ private:
   std::mutex mutex_;
   std::unique_ptr<TrajectoryStore> traj_;
   std::unique_ptr<TimedPoseBuffer> wheel_buf_;   // mirror for deskewing
+  std::unique_ptr<ImuYawBuffer> imu_buf_;
   std::unique_ptr<MapRebuilder> rebuilder_;
   std::shared_ptr<ScanArchive> archive_;
   std::deque<PendingScan> pending_scans_;
@@ -115,12 +126,15 @@ private:
   std::atomic<uint64_t> scans_provisional_{0};
   std::atomic<uint64_t> scans_turn_rejected_{0};
   std::atomic<uint64_t> scans_timeout_dropped_{0};
+  std::atomic<uint64_t> imu_samples_{0};
+  std::atomic<uint64_t> imu_deskew_fallbacks_{0};
 
   // Wheel path accumulation (guarded by mutex_)
   std::vector<geometry_msgs::msg::PoseStamped> wheel_poses_;
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Subscription<orb_slam3_msgs::msg::TrackedFrame>::SharedPtr tracked_sub_;
   rclcpp::Subscription<orb_slam3_msgs::msg::GraphSnapshot>::SharedPtr graph_sub_;

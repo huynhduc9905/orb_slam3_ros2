@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 #include <orb_slam3_wrapper/graph_semantics.hpp>
 
@@ -60,4 +61,42 @@ TEST(GraphSemantics, MergeAndLoopEvidenceAreEmittedOnlyOnTheirDeltas) {
   EXPECT_EQ(first.size(), 2u);
   EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(merged, graph(3, 23, true)).empty());
   EXPECT_TRUE(orb_slam3_wrapper::classifyGraphDelta(merged, merged).empty());
+}
+
+TEST(GraphSemantics, NewCanonicalLoopEdgeProducesLoopClosedEvidence) {
+  auto previous = graph(1, 17, true);
+  auto current = graph(2, 17, true);
+  ORB_SLAM3::KeyframeSnapshot a; a.id = 10; a.map_id = 17;
+  ORB_SLAM3::KeyframeSnapshot b; b.id = 20; b.map_id = 17; b.loop_edge_ids = {10};
+  current.keyframes = {a, b};
+
+  const auto evidence = orb_slam3_wrapper::classifyGraphDeltaEvidence(previous, current);
+
+  EXPECT_EQ(evidence.loop_edges.size(), 1U);
+  EXPECT_EQ(evidence.loop_edges[0].first_keyframe_id, 10U);
+  EXPECT_EQ(evidence.loop_edges[0].second_keyframe_id, 20U);
+  EXPECT_EQ(evidence.loop_edges[0].classification, "same_map_loop");
+  EXPECT_THAT(evidence.event_types,
+              ::testing::Contains(orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED));
+}
+
+TEST(GraphSemantics, CrossMapLoopProducesCrossMapClassification) {
+  auto previous = graph(1, 17, false);
+  auto current = graph(2, 23, true);
+  ORB_SLAM3::KeyframeSnapshot a; a.id = 10; a.map_id = 17;
+  ORB_SLAM3::KeyframeSnapshot b; b.id = 20; b.map_id = 23; b.loop_edge_ids = {10};
+  current.keyframes = {a, b};
+
+  const auto evidence = orb_slam3_wrapper::classifyGraphDeltaEvidence(previous, current);
+
+  EXPECT_EQ(evidence.loop_edges.size(), 1U);
+  EXPECT_EQ(evidence.loop_edges[0].first_keyframe_id, 10U);
+  EXPECT_EQ(evidence.loop_edges[0].second_keyframe_id, 20U);
+  EXPECT_EQ(evidence.loop_edges[0].first_map_id, 17U);
+  EXPECT_EQ(evidence.loop_edges[0].second_map_id, 23U);
+  EXPECT_EQ(evidence.loop_edges[0].active_map_id, 23U);
+  EXPECT_EQ(evidence.loop_edges[0].classification, "cross_map_loop");
+  EXPECT_THAT(evidence.event_types,
+              ::testing::Contains(orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED));
+  EXPECT_TRUE(evidence.map_merged);
 }

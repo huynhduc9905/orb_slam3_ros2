@@ -161,6 +161,62 @@ The yaw threshold is intentionally conservative. A roughly 99 ms scan at 0.5–1
 
 Timing parameters are validated for finite values and safe nanosecond conversion.
 
+### Thin-wall occupancy (P0/P1)
+
+Occupancy insert policy was retuned to reduce forward wall thickening. Live and
+rebuild share the same `GridConfig`. Defaults on the mapper node:
+
+```text
+hit_range_max_m = 10.0     # max range for painting occupied hits
+hit_log_odds = 0.55        # softer hit (was 0.85)
+miss_log_odds = -0.50      # slightly stronger free (was -0.40)
+usable_range_m = 20.0      # miss/clear range (node default; GridConfig alone is 12.0)
+```
+
+Hits beyond `hit_range_max_m` are not marked occupied; free-space clearing still
+uses `usable_range_m` for normal rays (beyond-hit-cap finite hits clear only to
+the hit cap). Diagnostics on `/diagnostics` include `hits_applied` and
+`hits_range_skipped`.
+
+### Live IMU deskew (P2)
+
+Handsfree ~200 Hz `/imu` is fused into **live** scan deskew only (relative
+motion inside a sweep). ORB remains the sole global pose authority; no
+pose-moving ICP.
+
+```text
+imu_topic = /imu
+enable_imu_deskew = true
+imu_retention_s = 300.0     # match wheel_retention_s
+imu_max_gap_ms = 20.0       # full-sweep coverage required for fusion
+```
+
+Fusion rule when IMU covers the full sweep: wheel **xy** + IMU-integrated
+**Δyaw** from scan start to each ray stamp; bracketed residual^α still
+uses ORB start/end anchors (residual end uses fused motion so α=1 lands
+on ORB `end_map`). Mapper waits for IMU coverage up to
+`pending_scan_timeout` when IMU samples have been seen; otherwise falls
+back. If coverage fails (gap > 20 ms or missing samples after timeout),
+deskew **falls back to wheel-only** and increments
+`imu_deskew_fallbacks` — the scan is not rejected for IMU alone.
+
+Diagnostics on `/diagnostics` also include `imu_samples`,
+`imu_deskew_fallbacks`, and `enable_imu_deskew` (0/1).
+
+Archive/rebuild still stores per-ray **wheel** poses this phase (P3 would
+archive IMU for rebuild). Plan:
+`docs/superpowers/plans/2026-07-17-orb-lidar-imu-deskew-p2.md`. Design:
+`docs/superpowers/specs/2026-07-17-orb-lidar-thin-walls-follow-orb-design.md`.
+
+**Bag replay (P2):** `forward-and-back-origin` via
+`tools/run_full_stack_dashboard.sh` (domain 94, rate 2.0) wrote
+`tools/full-stack-report/forward-and-back-origin-imu-deskew/` (gitignored).
+End-of-run diagnostics: `imu_samples≈16842`, `imu_deskew_fallbacks≈679`,
+`enable_imu_deskew=1`, `scans_committed≈893`, map free/occupied
+≈79183/4624. Loop-closure gate still fails on this bag (0 loops; expected
+for short out-and-back). Compare wall thickness on the dashboard/map PNGs
+vs pre-IMU runs.
+
 ## Validation Completed
 
 The mapper was built and tested after the implementation and again after final-review fixes.

@@ -17,13 +17,14 @@ TEST(TiledOccupancyGrid, HasSpecifiedDefaultConfiguration) {
   const GridConfig config;
   EXPECT_DOUBLE_EQ(config.resolution_m, 0.05);
   EXPECT_EQ(config.tile_size, 64);
-  EXPECT_FLOAT_EQ(config.hit_log_odds, 0.85F);
-  EXPECT_FLOAT_EQ(config.miss_log_odds, -0.40F);
+  EXPECT_FLOAT_EQ(config.hit_log_odds, 0.55F);
+  EXPECT_FLOAT_EQ(config.miss_log_odds, -0.50F);
   EXPECT_FLOAT_EQ(config.min_log_odds, -4.0F);
   EXPECT_FLOAT_EQ(config.max_log_odds, 4.0F);
   EXPECT_FLOAT_EQ(config.occupied_threshold, 0.619F);
   EXPECT_FLOAT_EQ(config.free_threshold, -0.619F);
   EXPECT_DOUBLE_EQ(config.usable_range_m, 12.0);
+  EXPECT_DOUBLE_EQ(config.hit_range_max_m, 10.0);
 }
 
 TEST(TiledOccupancyGrid, MarksFreeTraversalAndFiniteHitEndpoint) {
@@ -94,6 +95,7 @@ TEST(TiledOccupancyGrid, InfinityClearsWithoutOccupiedEndpointAndInvalidRangesAr
   GridConfig config;
   config.resolution_m = 1.0;
   config.usable_range_m = 3.0;
+  config.hit_range_max_m = 3.0;
   TiledOccupancyGrid grid(config);
   grid.insert({ray(std::numeric_limits<double>::infinity(), false),
                ray(std::numeric_limits<double>::infinity(), false),
@@ -111,6 +113,7 @@ TEST(TiledOccupancyGrid, FiniteRayBeyondUsableRangeClearsWithoutOccupiedEndpoint
   GridConfig config;
   config.resolution_m = 1.0;
   config.usable_range_m = 3.0;
+  config.hit_range_max_m = 3.0;
   TiledOccupancyGrid grid(config);
   grid.insert({ray(10.0), ray(10.0)});
 
@@ -120,6 +123,45 @@ TEST(TiledOccupancyGrid, FiniteRayBeyondUsableRangeClearsWithoutOccupiedEndpoint
   EXPECT_EQ(snapshot.cellAt(2, 0), 0);
   EXPECT_EQ(snapshot.cellAt(3, 0), 0);
   EXPECT_EQ(snapshot.cellAt(4, 0), -1);
+}
+
+TEST(TiledOccupancyGrid, FiniteHitBeyondHitRangeClearsWithoutOccupiedEndpoint) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  config.hit_range_max_m = 3.0;
+  config.usable_range_m = 10.0;
+  TiledOccupancyGrid grid(config);
+  grid.insert({ray(10.0), ray(10.0)});  // has_hit true, length 10 > hit cap 3
+  const GridSnapshot snapshot = grid.snapshot();
+  EXPECT_EQ(snapshot.cellAt(0, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(1, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(2, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(3, 0), 0);
+  EXPECT_EQ(snapshot.cellAt(4, 0), -1);  // no hit painted at 10
+  const auto stats = grid.lastInsertStats();
+  EXPECT_EQ(stats.hits_applied, 0U);
+  EXPECT_EQ(stats.hits_range_skipped, 2U);
+}
+
+TEST(TiledOccupancyGrid, FiniteHitWithinHitRangeMarksOccupied) {
+  GridConfig config;
+  config.resolution_m = 1.0;
+  config.hit_range_max_m = 5.0;
+  config.usable_range_m = 10.0;
+  // Soft default hit odds need two updates to cross occupied_threshold; use one strong hit.
+  config.hit_log_odds = 0.85F;
+  TiledOccupancyGrid grid(config);
+  grid.insert({ray(2.0)});
+  EXPECT_EQ(grid.snapshot().cellAt(2, 0), 100);
+  EXPECT_EQ(grid.lastInsertStats().hits_applied, 1U);
+  EXPECT_EQ(grid.lastInsertStats().hits_range_skipped, 0U);
+}
+
+TEST(TiledOccupancyGrid, RejectsHitRangeAboveUsableRange) {
+  GridConfig config;
+  config.hit_range_max_m = 15.0;
+  config.usable_range_m = 10.0;
+  EXPECT_THROW(TiledOccupancyGrid grid(config), std::invalid_argument);
 }
 
 TEST(TiledOccupancyGrid, UsesSignedFloorCellsAndNegativeTileKeys) {

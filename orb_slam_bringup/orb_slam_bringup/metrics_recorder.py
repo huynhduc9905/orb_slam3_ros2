@@ -116,7 +116,9 @@ class MapGridSample:
     origin_x: float
     origin_y: float
     origin_yaw: float
-    data: List[int]  # row-major, length width*height; 0 free, 100 occ, -1 unk
+    # Row-major occupancy; 0 free, 100 occ, -1 unk.
+    # Prefer np.ndarray (int16) on the live path to avoid multi-MB list copies.
+    data: Sequence[int]
 
 
 @dataclass
@@ -327,31 +329,28 @@ def _loss_intervals(events: Sequence[TrackingEventSample]) -> List[Dict[str, flo
 
 def count_occupancy_cells(data: Sequence[int]) -> Tuple[int, int, int]:
     """Count free (0), occupied (100 or other positive), unknown (<0)."""
-    free = occ = unk = 0
-    for v in data:
-        if v < 0:
-            unk += 1
-        elif v == 0:
-            free += 1
-        else:
-            occ += 1
+    arr = np.asarray(data, dtype=np.int16)
+    free = int(np.count_nonzero(arr == 0))
+    unk = int(np.count_nonzero(arr < 0))
+    occ = int(arr.size - free - unk)
     return free, occ, unk
 
 
 def occupancy_grid_to_png_array(
     width: int, height: int, data: Sequence[int]
 ) -> np.ndarray:
-    """Grayscale uint8 array (H, W): free light, occupied dark, unknown mid."""
-    arr = np.empty((height, width), dtype=np.uint8)
-    for i, v in enumerate(data):
-        r, c = divmod(i, width)
-        if v < 0:
-            arr[r, c] = PNG_UNKNOWN
-        elif v == 0:
-            arr[r, c] = PNG_FREE
-        else:
-            arr[r, c] = PNG_OCCUPIED
-    return arr
+    """Grayscale uint8 array (H, W): free light, occupied dark, unknown mid.
+
+    Semantics match count_occupancy_cells: free is exactly 0, any positive is
+    occupied, negative is unknown. Vectorized for mid-run map previews.
+    """
+    if width <= 0 or height <= 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+    arr = np.asarray(data, dtype=np.int16).reshape((height, width))
+    gray = np.full((height, width), PNG_UNKNOWN, dtype=np.uint8)
+    gray[arr == 0] = PNG_FREE
+    gray[arr > 0] = PNG_OCCUPIED
+    return gray
 
 
 def save_map_revision_png(
@@ -361,6 +360,114 @@ def save_map_revision_png(
     # Flip vertically so world +y is up in image (match PGM convention)
     arr = np.flipud(arr)
     Image.fromarray(arr, mode="L").save(path)
+
+
+class EventJsonlWriter:
+    """Append-only JSONL writer that keeps a single open handle.
+
+    Avoids open/close per event on the hot tracked_frame path. Thread-safe.
+    """
+
+    def __init__(self, path: Path) -> None:
+        import threading
+
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Truncate at start so each run is self-contained.
+        self._fh = self._path.open("w", encoding="utf-8")
+        self._lock = threading.Lock()
+
+    def append(self, obj: Dict[str, Any]) -> None:
+        with self._lock:
+            if self._fh is not None:
+                self._fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.flush()
+                    self._fh.close()
+                finally:
+                    self._fh = None  # type: ignore[assignment]
+
+
+class MapRevisionPngGate:
+    """Rate-limit mid-run map-revision PNGs.
+
+    Even with a background writer, unbounded PNG encode/write contends for the
+    GIL and disk and can starve the single-threaded rclpy executor. Default
+    one PNG per second is enough for dashboard/report previews; final-map is
+    always written on flush regardless of this gate.
+    """
+
+    def __init__(self, min_interval_s: float = 1.0) -> None:
+        self._min_interval_s = float(min_interval_s)
+        self._last_write_t: Optional[float] = None
+
+    def should_write(self, t: float, map_revision: int = 0) -> bool:
+        del map_revision  # reserved for future "always write revision N" policy
+        if self._min_interval_s <= 0.0:
+            return True
+        if self._last_write_t is None or (t - self._last_write_t) >= self._min_interval_s:
+            self._last_write_t = float(t)
+            return True
+        return False
+
+
+class MapRevisionPngQueue:
+    """Background worker for map-revision PNG encode/write.
+
+    Callers enqueue a snapshot of the grid; join() drains pending work so
+    artifacts exist before process exit. ROS callbacks must not block on I/O.
+    """
+
+    def __init__(self) -> None:
+        import queue
+        import threading
+
+        self._queue: "queue.Queue[Optional[Tuple[MapGridSample, Path]]]" = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._run, name="map-revision-png-writer", daemon=True
+        )
+        self._thread.start()
+
+    def enqueue(self, grid: MapGridSample, path: Path) -> None:
+        # Snapshot grid data so callers can mutate the live map safely.
+        if isinstance(grid.data, np.ndarray):
+            data: Sequence[int] = grid.data.copy()
+        else:
+            data = np.asarray(grid.data, dtype=np.int16).copy()
+        snap = MapGridSample(
+            width=grid.width,
+            height=grid.height,
+            resolution=grid.resolution,
+            origin_x=grid.origin_x,
+            origin_y=grid.origin_y,
+            origin_yaw=grid.origin_yaw,
+            data=data,
+        )
+        self._queue.put((snap, Path(path)))
+
+    def join(self) -> None:
+        """Block until all enqueued jobs finish, then stop the worker."""
+        self._queue.put(None)
+        self._thread.join(timeout=120.0)
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                grid, path = item
+                try:
+                    save_map_revision_png(grid, path)
+                except Exception:  # noqa: BLE001
+                    # Best-effort artifact; never kill the worker.
+                    pass
+            finally:
+                self._queue.task_done()
 
 
 def write_nav2_map(grid: MapGridSample, path_stem: Path | str) -> None:
@@ -374,22 +481,15 @@ def write_nav2_map(grid: MapGridSample, path_stem: Path | str) -> None:
     yaml_path = Path(str(stem) + ".yaml")
 
     w, h = grid.width, grid.height
-    pixels = bytearray(w * h)
     # OccupancyGrid: row 0 is y=origin (bottom). PGM row 0 is top → flip.
-    for row in range(h):
-        src_row = h - 1 - row
-        for col in range(w):
-            v = grid.data[src_row * w + col]
-            if v < 0:
-                pix = PGM_UNKNOWN
-            elif v == 0:
-                pix = PGM_FREE
-            else:
-                pix = PGM_OCCUPIED
-            pixels[row * w + col] = pix
+    arr = np.asarray(grid.data, dtype=np.int16).reshape((h, w))
+    arr = np.flipud(arr)
+    pixels = np.full(arr.shape, PGM_UNKNOWN, dtype=np.uint8)
+    pixels[arr == 0] = PGM_FREE
+    pixels[arr > 0] = PGM_OCCUPIED
 
     header = f"P5\n{w} {h}\n255\n".encode("ascii")
-    atomic_write_bytes(pgm_path, header + bytes(pixels))
+    atomic_write_bytes(pgm_path, header + pixels.tobytes())
 
     meta = {
         "image": pgm_path.name,
@@ -932,6 +1032,9 @@ class MetricsRecorderNode:
         n.declare_parameter("config_path", "")
         n.declare_parameter("repo_dir", "")
         n.declare_parameter("expected_stereo_pairs", 6633)
+        # Min sim-time between mid-run map-revision-*.png writes. 0 = every
+        # published revision (old behavior; can starve tracked_frame capture).
+        n.declare_parameter("map_revision_png_min_interval_s", 1.0)
         n.declare_parameter(
             "left_camera_info_topic", "/camera/camera/infra1/camera_info"
         )
@@ -978,8 +1081,21 @@ class MetricsRecorderNode:
 
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self._artifact_dir / "events.jsonl"
-        # Truncate events log at start
-        self._events_path.write_text("", encoding="utf-8")
+        # Keep a single open handle — open/close per tracked_frame was wasteful
+        # and mid-run PNG I/O on the same spin thread starved frame capture.
+        self._events_writer = EventJsonlWriter(self._events_path)
+        self._png_queue = MapRevisionPngQueue()
+        import threading
+        self._lock = threading.Lock()
+        try:
+            png_interval = float(
+                n.get_parameter("map_revision_png_min_interval_s")
+                .get_parameter_value()
+                .double_value
+            )
+        except Exception:  # noqa: BLE001
+            png_interval = 1.0
+        self._png_gate = MapRevisionPngGate(min_interval_s=png_interval)
 
         self._frames: List[FrameSample] = []
         self._events: List[TrackingEventSample] = []
@@ -1010,22 +1126,32 @@ class MetricsRecorderNode:
         # camera_validated stays False until a live CameraInfo confirms).
         self._load_profile_camera_defaults()
 
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+
+        # Separate groups so MultiThreadedExecutor can service tracked_frame
+        # while a map/PNG-related callback is busy.
+        self._tracking_cb_group = MutuallyExclusiveCallbackGroup()
+        self._map_cb_group = MutuallyExclusiveCallbackGroup()
+        self._misc_cb_group = MutuallyExclusiveCallbackGroup()
+
         reliable = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=50,
             durability=DurabilityPolicy.VOLATILE,
         )
-        reliable_transient = QoSProfile(
+        # Only the latest map is useful for previews/final export; deep queues
+        # of multi-MB OccupancyGrid messages starve the recorder.
+        reliable_transient_latest = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         best_effort = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=50,
+            depth=200,  # was 50; absorb brief map-side stalls
         )
         # Sensor-data QoS for bag camera streams (BEST_EFFORT KEEP_LAST)
         sensor_qos = QoSProfile(
@@ -1046,35 +1172,68 @@ class MetricsRecorderNode:
         from diagnostic_msgs.msg import DiagnosticArray
 
         n.create_subscription(
-            TrackedFrame, "/orb_slam3/tracked_frame", self._on_tracked_frame, best_effort
+            TrackedFrame,
+            "/orb_slam3/tracked_frame",
+            self._on_tracked_frame,
+            best_effort,
+            callback_group=self._tracking_cb_group,
         )
         n.create_subscription(
-            TrackingEvent, "/orb_slam3/events", self._on_tracking_event, reliable
+            TrackingEvent,
+            "/orb_slam3/events",
+            self._on_tracking_event,
+            reliable,
+            callback_group=self._tracking_cb_group,
         )
         n.create_subscription(
-            MapRevision, "/orb_lidar/map_revision", self._on_map_revision, reliable
+            MapRevision,
+            "/orb_lidar/map_revision",
+            self._on_map_revision,
+            reliable,
+            callback_group=self._map_cb_group,
         )
         n.create_subscription(
-            OccupancyGrid, "/orb_lidar/map", self._on_map, reliable_transient
+            OccupancyGrid,
+            "/orb_lidar/map",
+            self._on_map,
+            reliable_transient_latest,
+            callback_group=self._map_cb_group,
         )
         n.create_subscription(
             RevisionedPath,
             "/orb_lidar/corrected_path_revisioned",
             self._on_corrected_path,
             reliable,
+            callback_group=self._misc_cb_group,
         )
         n.create_subscription(
-            NavPath, "/orb_lidar/wheel_path", self._on_wheel_path, reliable
+            NavPath,
+            "/orb_lidar/wheel_path",
+            self._on_wheel_path,
+            reliable,
+            callback_group=self._misc_cb_group,
         )
         n.create_subscription(
-            DiagnosticArray, "/diagnostics", self._on_diagnostics, best_effort
+            DiagnosticArray,
+            "/diagnostics",
+            self._on_diagnostics,
+            best_effort,
+            callback_group=self._misc_cb_group,
         )
         # Stereo pair counting + camera validation (READ-ONLY CameraInfo stamps)
         n.create_subscription(
-            CameraInfo, left_info_topic, self._on_left_camera_info, sensor_qos
+            CameraInfo,
+            left_info_topic,
+            self._on_left_camera_info,
+            sensor_qos,
+            callback_group=self._misc_cb_group,
         )
         n.create_subscription(
-            CameraInfo, right_info_topic, self._on_right_camera_info, sensor_qos
+            CameraInfo,
+            right_info_topic,
+            self._on_right_camera_info,
+            sensor_qos,
+            callback_group=self._misc_cb_group,
         )
 
         # Flush on shutdown
@@ -1096,8 +1255,11 @@ class MetricsRecorderNode:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def _append_event_jsonl(self, obj: Dict[str, Any]) -> None:
-        with self._events_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        try:
+            self._events_writer.append(obj)
+        except Exception:  # noqa: BLE001
+            # Never let artifact I/O drop tracking samples.
+            pass
 
     def _load_profile_camera_defaults(self) -> None:
         """Load nominal camera geometry from profile YAML (not validation)."""
@@ -1255,21 +1417,29 @@ class MetricsRecorderNode:
                 "committed_scan_count": int(msg.committed_scan_count),
             }
         )
-        # On PUBLISHED, capture PNG from latest map
+        # On PUBLISHED, rate-limit + queue PNG off the executor thread so
+        # tracked_frame callbacks are not starved by encode/disk/GIL work.
         if int(msg.state) == MAP_PUBLISHED and self._last_map is not None:
             n = int(msg.map_revision) if msg.map_revision else (
                 self._revision_png_count + 1
             )
             self._revision_png_count = max(self._revision_png_count, n)
+            if not self._png_gate.should_write(t=t, map_revision=n):
+                return
             png_path = self._artifact_dir / f"map-revision-{n}.png"
             try:
-                save_map_revision_png(self._last_map, png_path)
+                self._png_queue.enqueue(self._last_map, png_path)
             except Exception as exc:  # noqa: BLE001
-                self._node.get_logger().warning(f"map revision PNG failed: {exc}")
+                self._node.get_logger().warning(f"map revision PNG enqueue failed: {exc}")
 
     def _on_map(self, msg) -> None:
         info = msg.info
-        data = [int(v) for v in msg.data]
+        # Keep a compact int16 snapshot (not a Python int list) so map
+        # publishes do not dominate the single-threaded executor.
+        try:
+            data: Sequence[int] = np.asarray(msg.data, dtype=np.int16).copy()
+        except Exception:  # noqa: BLE001
+            data = np.asarray([int(v) for v in msg.data], dtype=np.int16)
         origin = info.origin
         yaw = yaw_from_quaternion(
             origin.orientation.x,
@@ -1348,6 +1518,15 @@ class MetricsRecorderNode:
             return
         self._flushed = True
         try:
+            # Drain background PNG worker before final artifacts / process exit.
+            try:
+                self._png_queue.join()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._events_writer.close()
+            except Exception:  # noqa: BLE001
+                pass
             self._do_flush()
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1551,17 +1730,24 @@ def _verify_nav2_map(grid: MapGridSample, stem: Path) -> bool:
 
 def main(args=None) -> None:
     import rclpy
-    from rclpy.executors import ExternalShutdownException
+    from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 
     rclpy.init(args=args)
     recorder = MetricsRecorderNode()
     node = recorder.node
+    # Multi-threaded so map/PNG-related work cannot starve tracked_frame.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         recorder._flush()
+        try:
+            executor.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             node.destroy_node()
         except Exception:  # noqa: BLE001

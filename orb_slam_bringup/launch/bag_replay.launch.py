@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -142,6 +143,15 @@ def _setup(context, *args, **kwargs):
     publish_odom_tf = LaunchConfiguration("publish_odom_tf").perform(context).lower()
     start_dashboard = LaunchConfiguration("start_dashboard").perform(context).lower()
     dashboard_host = LaunchConfiguration("dashboard_host").perform(context)
+    
+    benchmark_mode = LaunchConfiguration("benchmark_mode").perform(context).strip().lower()
+    benchmark_min_duration_s = float(
+        LaunchConfiguration("benchmark_min_duration_s").perform(context)
+    )
+    if benchmark_mode not in ("off", "orb_only", "full_stack"):
+        raise RuntimeError("benchmark_mode must be one of: off, orb_only, full_stack")
+    if benchmark_min_duration_s < 0.0:
+        raise RuntimeError("benchmark_min_duration_s must be nonnegative")
 
     bringup_share = Path(get_package_share_directory("orb_slam_bringup"))
     profile_path = bringup_share / "config" / "tasterobot_bag.yaml"
@@ -160,24 +170,16 @@ def _setup(context, *args, **kwargs):
     ]
 
     recorded_pairs = _inspect_bag_static_pairs(bag_path)
-    # Fail early if supplemental would duplicate recorded parent/child pairs.
     recorded_set = set(recorded_pairs)
-    for parent, child in supplemental_pairs:
-        if (parent, child) in recorded_set:
-            raise RuntimeError(
-                f"Supplemental TF {parent}->{child} would duplicate a recorded "
-                f"/tf_static edge; refusing to start publishers."
-            )
-    # Confirm only the two configured mount edges are the ones we must add
-    # among the required mount set (base_link->camera_link, base_link->base_scan).
+    # Publish profile supplemental mounts only when the bag is missing them.
+    # Newer bags (e.g. forward-and-back-origin) already record
+    # base_link→camera_link and base_link→base_scan; older 20260713 bags do not.
     missing_mounts = [
         pair for pair in supplemental_pairs if pair not in recorded_set
     ]
-    if set(missing_mounts) != set(supplemental_pairs):
-        raise RuntimeError(
-            f"Expected both mount edges absent from bag; missing={missing_mounts} "
-            f"configured={supplemental_pairs}"
-        )
+    present_mounts = [
+        pair for pair in supplemental_pairs if pair in recorded_set
+    ]
 
     os.makedirs(artifact_dir, exist_ok=True)
 
@@ -187,27 +189,37 @@ def _setup(context, *args, **kwargs):
     if ros_domain_id:
         actions.append(SetEnvironmentVariable("ROS_DOMAIN_ID", ros_domain_id))
 
-    # Supplemental static mounts (authoritative recorded edges stay from bag).
+    if present_mounts:
+        actions.append(
+            LogInfo(
+                msg=(
+                    "[bag_replay] using bag /tf_static for mounts: "
+                    + ", ".join(f"{p}->{c}" for p, c in present_mounts)
+                )
+            )
+        )
+
+    # Supplemental static mounts for edges absent from the bag only.
     cam = supplemental["camera_link"]
     scan = supplemental["base_scan"]
-    actions.append(
-        _static_transform_node(
+    mount_specs = {
+        (cam["parent"], cam["child"]): (
             "supplemental_tf_camera_link",
-            cam["parent"],
-            cam["child"],
             cam["xyz"],
             cam["rpy"],
-        )
-    )
-    actions.append(
-        _static_transform_node(
+        ),
+        (scan["parent"], scan["child"]): (
             "supplemental_tf_base_scan",
-            scan["parent"],
-            scan["child"],
             scan["xyz"],
             scan["rpy"],
+        ),
+    }
+    for parent, child in missing_mounts:
+        name, xyz, rpy = mount_specs[(parent, child)]
+        actions.append(
+            LogInfo(msg=f"[bag_replay] publishing supplemental TF {parent}->{child}")
         )
-    )
+        actions.append(_static_transform_node(name, parent, child, xyz, rpy))
 
     # Replay-only odom -> base_link TF (default true for bag replay).
     if publish_odom_tf in ("true", "1", "yes"):
@@ -242,7 +254,7 @@ def _setup(context, *args, **kwargs):
                         [[p, c] for p, c in recorded_pairs]
                     ),
                     "supplemental_pairs": json.dumps(
-                        [[p, c] for p, c in supplemental_pairs]
+                        [[p, c] for p, c in missing_mounts]
                     ),
                 }
             ],
@@ -257,69 +269,105 @@ def _setup(context, *args, **kwargs):
     except Exception:  # pragma: no cover
         settings_file = ""
 
+    wrapper_log_path = str(Path(artifact_dir) / "orb_slam3_wrapper.log")
+
+    wrapper_cmd_parts = [
+        "ros2", "run", "orb_slam3_wrapper", "orb_slam3_wrapper_node",
+        "--ros-args", "-r", "__node:=orb_slam3_wrapper",
+        "-p", "use_sim_time:=true",
+        "-p", f"left_image_topic:={profile['camera']['left_image']}",
+        "-p", f"right_image_topic:={profile['camera']['right_image']}",
+        "-p", f"left_info_topic:={profile['camera']['left_info']}",
+        "-p", f"right_info_topic:={profile['camera']['right_info']}",
+        "-p", "base_frame:=base_link",
+        "-p", "map_frame:=orb_map",
+        "-p", f"settings_file:={settings_file}",
+    ]
+    wrapper_cmd_quoted = " ".join(shlex.quote(p) for p in wrapper_cmd_parts)
+    script_content = (
+        f"exec {wrapper_cmd_quoted} > >(tee -a {shlex.quote(wrapper_log_path)}) 2>&1"
+    )
+
     actions.append(
-        Node(
-            package="orb_slam3_wrapper",
-            executable="orb_slam3_wrapper_node",
+        ExecuteProcess(
+            cmd=["bash", "-c", script_content],
             name="orb_slam3_wrapper",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "left_image_topic": profile["camera"]["left_image"],
-                    "right_image_topic": profile["camera"]["right_image"],
-                    "left_info_topic": profile["camera"]["left_info"],
-                    "right_info_topic": profile["camera"]["right_info"],
-                    "base_frame": "base_link",
-                    "map_frame": "orb_map",
-                    "settings_file": settings_file,
-                }
-            ],
             output="screen",
+            shell=False,
         )
     )
 
     # Lidar mapper
-    actions.append(
-        Node(
-            package="orb_lidar_mapper",
-            executable="orb_lidar_mapper_node",
-            name="orb_lidar_mapper",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "odom_topic": profile["odometry"]["topic"],
-                    "scan_topic": profile["lidar"]["topic"],
-                    "map_frame": "orb_map",
-                    "base_frame": "base_link",
-                }
-            ],
-            output="screen",
+    if benchmark_mode in ("off", "full_stack"):
+        actions.append(
+            Node(
+                package="orb_lidar_mapper",
+                executable="orb_lidar_mapper_node",
+                name="orb_lidar_mapper",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "odom_topic": profile["odometry"]["topic"],
+                        "scan_topic": profile["lidar"]["topic"],
+                        "map_frame": "orb_map",
+                        "base_frame": "base_link",
+                    }
+                ],
+                output="screen",
+            )
         )
-    )
 
     # Metrics recorder (Task 5): read-only subscribers; flushes on bag-exit Shutdown.
-    actions.append(
-        Node(
-            package="orb_slam_bringup",
-            executable="metrics_recorder",
-            name="metrics_recorder",
-            parameters=[
-                {
-                    "use_sim_time": True,
-                    "artifact_dir": artifact_dir,
-                    "bag_path": bag_path,
-                    "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
-                    "config_path": str(profile_path),
-                    "repo_dir": str(Path(__file__).resolve().parents[2]),
-                    "expected_stereo_pairs": 6633,
-                }
-            ],
-            output="screen",
+    if benchmark_mode in ("off", "full_stack"):
+        actions.append(
+            Node(
+                package="orb_slam_bringup",
+                executable="metrics_recorder",
+                name="metrics_recorder",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "artifact_dir": artifact_dir,
+                        "bag_path": bag_path,
+                        "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
+                        "config_path": str(profile_path),
+                        "repo_dir": str(Path(__file__).resolve().parents[2]),
+                        # Soft expected count for report gates; bag-specific.
+                        # 0 disables strict expected-pairs matching (recorder still counts).
+                        "expected_stereo_pairs": int(
+                            profile.get("bag", {}).get("expected_stereo_pairs", 0)
+                        ),
+                    }
+                ],
+                output="screen",
+            )
         )
-    )
+
+    # Tracking benchmark probe (Task 2)
+    if benchmark_mode != "off":
+        actions.append(
+            LogInfo(msg="[bag_replay] benchmark modes do not start the dashboard")
+        )
+        actions.append(
+            Node(
+                package="orb_slam_bringup",
+                executable="tracking_benchmark_probe",
+                name="tracking_benchmark_probe",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "artifact_dir": artifact_dir,
+                        "mode": benchmark_mode,
+                        "playback_rate": float(rate),
+                        "min_duration_s": benchmark_min_duration_s,
+                    }
+                ],
+                output="screen",
+            )
+        )
 
     # Dashboard: custom read-only dashboard_server (no foxglove) when requested.
-    if start_dashboard in ("true", "1", "yes"):
+    if start_dashboard in ("true", "1", "yes") and benchmark_mode == "off":
         dashboard_candidates = [
             bringup_share / "launch" / "dashboard.launch.py",
             Path(__file__).resolve().parent / "dashboard.launch.py",
@@ -431,6 +479,16 @@ def generate_launch_description() -> LaunchDescription:
                 description=(
                     "Tailscale/LAN bind host for dashboard when start_dashboard:=true"
                 ),
+            ),
+            DeclareLaunchArgument(
+                "benchmark_mode",
+                default_value="off",
+                description="Mode for tracking benchmark: off, orb_only, or full_stack",
+            ),
+            DeclareLaunchArgument(
+                "benchmark_min_duration_s",
+                default_value="10.0",
+                description="Minimum tracking duration in seconds for benchmark mode",
             ),
             OpaqueFunction(function=_setup),
         ]

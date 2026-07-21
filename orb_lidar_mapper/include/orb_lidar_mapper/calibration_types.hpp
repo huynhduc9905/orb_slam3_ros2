@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "orb_lidar_mapper/imu_yaw_buffer.hpp"
 #include "orb_lidar_mapper/pose2.hpp"
 #include "orb_lidar_mapper/scan_deskewer.hpp"
 #include "orb_lidar_mapper/timed_pose_buffer.hpp"
@@ -16,11 +17,6 @@ inline constexpr double kPi = 3.14159265358979323846;
 struct TimedTwist2 {
   std::int64_t stamp_ns{};
   Twist2 twist;
-};
-
-struct TimedYawRate {
-  std::int64_t stamp_ns{};
-  double omega_rad_s{};
 };
 
 struct StaticLidarMount {

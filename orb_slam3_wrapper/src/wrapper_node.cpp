@@ -1,6 +1,7 @@
 #include "orb_slam3_wrapper/wrapper_node.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <opencv2/imgcodecs.hpp>
 #include <tf2/exceptions.h>
@@ -53,7 +54,21 @@ bool cameraInfoCalibrationEqual(const sensor_msgs::msg::CameraInfo& lhs,
       lhs.roi.do_rectify == rhs.roi.do_rectify;
 }
 
+std::size_t canonicalLoopEdgeCount(const ORB_SLAM3::GraphSnapshot& graph) {
+  std::set<std::pair<std::uint64_t, std::uint64_t>> edges;
+  for (const auto& keyframe : graph.keyframes) {
+    for (const auto id : keyframe.loop_edge_ids) {
+      edges.emplace(std::min(keyframe.id, id), std::max(keyframe.id, id));
+    }
+  }
+  return edges.size();
+}
+
 }  // namespace
+
+std::size_t canonicalLoopEdgeCountForTest(const ORB_SLAM3::GraphSnapshot& graph) {
+  return canonicalLoopEdgeCount(graph);
+}
 
 WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
 : Node("orb_slam3_wrapper"), backend_(std::move(backend)),
@@ -126,6 +141,17 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
     imageCallback(left, right);
   });
 
+  graph_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this] {
+    pollGraphChanges();
+  });
+
+  log_keyframe_drift_ = declare_parameter("log_keyframe_drift", false);
+  if (log_keyframe_drift_) {
+    drift_timer_ = create_wall_timer(std::chrono::milliseconds(500), [this] {
+      if (backend_ && backend_configured_) logKeyframeDrift(backend_->graphSnapshot());
+    });
+  }
+
   if (!backend_ && !settings.empty() && !vocabulary.empty()) {
     backend_ = std::make_unique<OrbSlam3Backend>(vocabulary, settings);
   }
@@ -139,6 +165,9 @@ void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPt
   cached = *msg;
   calibration_.reset();
   backend_configured_ = false;
+  graph_baseline_captured_ = false;
+  previous_graph_.reset();
+  last_graph_revision_ = 0;
   failed_calibration_.reset();
 }
 
@@ -152,6 +181,9 @@ void WrapperNode::setCameraInfoForTest(const sensor_msgs::msg::CameraInfo& left,
   if (!changed) return;
   calibration_.reset();
   backend_configured_ = false;
+  graph_baseline_captured_ = false;
+  previous_graph_.reset();
+  last_graph_revision_ = 0;
   failed_calibration_.reset();
 }
 
@@ -188,6 +220,64 @@ void WrapperNode::processStereoForTest(const Image& left, const Image& right) {
   } else {
     processStereo(left, right);
   }
+}
+
+void WrapperNode::pollGraphChanges() {
+  if (!backend_ || !backend_configured_ || last_tracked_.header.frame_id.empty()) return;
+  if (!graph_baseline_captured_) {
+    previous_graph_ = backend_->graphSnapshot();
+    RCLCPP_INFO(get_logger(),
+                "graph_observation stage=baseline revision=%lu raw_loop_edges=%zu previous_baseline=false",
+                static_cast<unsigned long>(previous_graph_->revision),
+                canonicalLoopEdgeCount(*previous_graph_));
+    graph_baseline_captured_ = true;
+  }
+  if (!backend_->mapChanged()) return;
+  const auto graph = backend_->graphSnapshot();
+  if (graph.revision != last_graph_revision_) publishGraph(graph, last_tracked_.header);
+}
+
+void WrapperNode::logKeyframeDrift(const ORB_SLAM3::GraphSnapshot& graph) {
+  // Read-only: compare each keyframe's current camera translation against the
+  // value observed on the previous poll. This runs regardless of MapChanged()
+  // so it captures ongoing local-BA refinement that never bumps the published
+  // revision. Reports how much of the graph is still moving and where.
+  std::size_t moved = 0;
+  double max_delta = 0.0;
+  std::uint64_t max_id = 0;
+  double sum_delta = 0.0;
+  std::uint64_t newest_id = 0;
+  double newest_delta = 0.0;
+  std::unordered_map<std::uint64_t, std::array<double, 3>> current;
+  current.reserve(graph.keyframes.size());
+  for (const auto& kf : graph.keyframes) {
+    if (kf.bad) continue;
+    const auto t = kf.T_world_camera.translation();
+    const std::array<double, 3> pos{static_cast<double>(t.x()),
+                                    static_cast<double>(t.y()),
+                                    static_cast<double>(t.z())};
+    current[kf.id] = pos;
+    const auto found = drift_last_pose_.find(kf.id);
+    if (found != drift_last_pose_.end()) {
+      const double dx = pos[0] - found->second[0];
+      const double dy = pos[1] - found->second[1];
+      const double dz = pos[2] - found->second[2];
+      const double delta = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (delta > 1e-4) ++moved;
+      sum_delta += delta;
+      if (delta > max_delta) { max_delta = delta; max_id = kf.id; }
+      if (kf.id >= newest_id) { newest_id = kf.id; newest_delta = delta; }
+    }
+  }
+  const std::size_t total = current.size();
+  const double mean_delta = total > 0 ? sum_delta / static_cast<double>(total) : 0.0;
+  RCLCPP_INFO(get_logger(),
+              "keyframe_drift revision=%lu keyframes=%zu moved=%zu mean_m=%.4f "
+              "max_m=%.4f max_kf=%lu newest_kf=%lu newest_kf_delta_m=%.4f",
+              static_cast<unsigned long>(graph.revision), total, moved, mean_delta,
+              max_delta, static_cast<unsigned long>(max_id),
+              static_cast<unsigned long>(newest_id), newest_delta);
+  drift_last_pose_ = std::move(current);
 }
 
 void WrapperNode::processStereo(const Image& left, const Image& right) {
@@ -240,18 +330,13 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
 
   const auto stamp = rclcpp::Time(left.header.stamp);
   const auto frame = backend_->trackStereo(mono8(left), mono8(right), stamp.seconds());
-  std::optional<ORB_SLAM3::GraphSnapshot> graph_to_publish;
-  if (backend_->mapChanged()) {
-    const auto graph = backend_->graphSnapshot();
-    if (graph.revision != last_graph_revision_) graph_to_publish = graph;
-  }
   orb_slam3_msgs::msg::TrackedFrame output;
   output.header.stamp = left.header.stamp; output.header.frame_id = map_frame_;
   output.tracking_state = static_cast<std::uint8_t>(frame.tracking_state);
   output.pose_valid = frame.pose_valid;
   output.map_id = frame.map_id; output.reference_keyframe_id = frame.reference_keyframe_id;
   output.tracked_keypoints = static_cast<std::uint32_t>(frame.tracked_keypoints);
-  output.graph_revision = graph_to_publish ? graph_to_publish->revision : last_graph_revision_;
+  output.graph_revision = last_graph_revision_;
   if (frame.pose_valid && converter_) {
     if (frame.tracking_state == orb_slam3_msgs::msg::TrackedFrame::OK && !converter_->initialized())
       converter_->anchor(frame.T_world_camera);
@@ -279,8 +364,6 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
     event.detail = "first valid ORB pose"; events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
   }
   last_tracking_state_ = frame.tracking_state;
-
-  if (graph_to_publish) publishGraph(*graph_to_publish, output.header);
 
   if (tracking_image_rate_hz_ > 0.0 && (last_tracking_image_time_.nanoseconds() == 0 ||
       (stamp - last_tracking_image_time_).seconds() >= 1.0 / tracking_image_rate_hz_)) {
@@ -327,10 +410,27 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
   graph_pub_->publish(output); path_pub_->publish(path); last_graph_ = output; ++graph_publish_count_;
   keyframe_markers.markers.push_back(keyframe_marker); loop_markers.markers.push_back(loop_marker);
   keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
-  for (const auto type : classifyGraphDelta(previous_graph_, graph)) {
+  const auto evidence = classifyGraphDeltaEvidence(previous_graph_, graph);
+  RCLCPP_INFO(get_logger(),
+              "graph_observation stage=changed revision=%lu raw_loop_edges=%zu previous_baseline=%s extracted_loop_edges=%zu",
+              static_cast<unsigned long>(graph.revision), canonicalLoopEdgeCount(graph),
+              previous_graph_ ? "true" : "false",
+              evidence.loop_edges.size());
+  for (const auto type : evidence.event_types) {
+    if (type == orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED) continue;
     orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = type;
     event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
     event.detail = "semantic graph evidence observed in snapshot delta";
+    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+  }
+  for (const auto& loop_edge : evidence.loop_edges) {
+    orb_slam3_msgs::msg::TrackingEvent event; event.header = header;
+    event.type = orb_slam3_msgs::msg::TrackingEvent::LOOP_CLOSED;
+    event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
+    event.detail = "loop_edge=" + std::to_string(loop_edge.first_keyframe_id) + "-" + std::to_string(loop_edge.second_keyframe_id) +
+                   " classification=" + loop_edge.classification +
+                   " maps=" + std::to_string(loop_edge.first_map_id) + "," + std::to_string(loop_edge.second_map_id) +
+                   " active_map=" + std::to_string(loop_edge.active_map_id);
     events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
   }
   previous_graph_ = graph;

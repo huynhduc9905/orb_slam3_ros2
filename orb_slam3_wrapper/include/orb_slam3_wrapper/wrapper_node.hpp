@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <cv_bridge/cv_bridge.hpp>
@@ -36,6 +38,8 @@
 
 namespace orb_slam3_wrapper {
 
+std::size_t canonicalLoopEdgeCountForTest(const ORB_SLAM3::GraphSnapshot& graph);
+
 class WrapperNode final : public rclcpp::Node {
 public:
   explicit WrapperNode(std::unique_ptr<SlamBackend> backend = nullptr);
@@ -56,6 +60,8 @@ private:
   void imageCallback(const Image::ConstSharedPtr left, const Image::ConstSharedPtr right);
   void infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left);
   void processStereo(const Image& left, const Image& right);
+  void pollGraphChanges();
+  void logKeyframeDrift(const ORB_SLAM3::GraphSnapshot& graph);
   cv::Mat mono8(const Image& image) const;
   void publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_msgs::msg::Header& header);
   void publishDiagnostics(const std::string& level, const std::string& message);
@@ -96,13 +102,23 @@ private:
   std::unique_ptr<message_filters::Subscriber<Image>> left_sync_sub_;
   std::unique_ptr<message_filters::Subscriber<Image>> right_sync_sub_;
   std::unique_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_;
+  rclcpp::TimerBase::SharedPtr graph_timer_;
   orb_slam3_msgs::msg::TrackedFrame last_tracked_;
   orb_slam3_msgs::msg::GraphSnapshot last_graph_;
   orb_slam3_msgs::msg::TrackingEvent last_event_;
   std::size_t graph_publish_count_{0};
   std::size_t event_publish_count_{0};
+  bool graph_baseline_captured_{false};
   std::optional<ORB_SLAM3::GraphSnapshot> previous_graph_;
   std::unique_ptr<LatestImageWorker> image_worker_;
+
+  // Read-only diagnostic (param-gated): measures how much ORB-SLAM3 moves
+  // keyframe camera poses between successive graph polls, independent of the
+  // published revision / MapChanged() gate. Used to determine whether the tail
+  // of the trajectory keeps being optimized after the last loop closure.
+  bool log_keyframe_drift_{false};
+  rclcpp::TimerBase::SharedPtr drift_timer_;
+  std::unordered_map<std::uint64_t, std::array<double, 3>> drift_last_pose_;
 };
 
 }  // namespace orb_slam3_wrapper

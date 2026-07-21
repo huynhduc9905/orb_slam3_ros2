@@ -17,11 +17,16 @@ from orb_slam_bringup.metrics_recorder import (
     EVENT_RELOCALIZED,
     MAP_BUILDING,
     MAP_PUBLISHED,
+    PNG_FREE,
+    PNG_OCCUPIED,
+    PNG_UNKNOWN,
     TRACK_LOST,
     TRACK_OK,
     TRACK_RECENTLY_LOST,
+    EventJsonlWriter,
     FrameSample,
     MapGridSample,
+    MapRevisionPngQueue,
     MapRevisionSample,
     MetricsAggregator,
     TrackingEventSample,
@@ -308,6 +313,83 @@ def test_occupancy_grid_to_png_array_values():
     assert arr.shape == (1, 3)
     # occupied dark, free light, unknown mid
     assert arr[0, 0] > arr[0, 2] > arr[0, 1]
+    assert int(arr[0, 0]) == PNG_FREE
+    assert int(arr[0, 1]) == PNG_OCCUPIED
+    assert int(arr[0, 2]) == PNG_UNKNOWN
+
+
+def test_occupancy_grid_to_png_array_multirow_and_nonzero_free_only_zero():
+    """Semantics: free is exactly 0; any positive is occupied; negative unknown."""
+    data = [
+        0, 50, -1,
+        100, 0, 1,
+    ]
+    arr = occupancy_grid_to_png_array(3, 2, data)
+    assert arr.shape == (2, 3)
+    assert int(arr[0, 0]) == PNG_FREE
+    assert int(arr[0, 1]) == PNG_OCCUPIED  # 50 is occupied (not free band)
+    assert int(arr[0, 2]) == PNG_UNKNOWN
+    assert int(arr[1, 0]) == PNG_OCCUPIED
+    assert int(arr[1, 1]) == PNG_FREE
+    assert int(arr[1, 2]) == PNG_OCCUPIED
+
+
+def test_map_revision_png_queue_writes_on_join(tmp_path: Path):
+    """PNG encode/write must not be required to finish before enqueue returns."""
+    data = [0, 100, -1, 0]
+    grid = MapGridSample(
+        width=2,
+        height=2,
+        resolution=0.05,
+        origin_x=0.0,
+        origin_y=0.0,
+        origin_yaw=0.0,
+        data=data,
+    )
+    path = tmp_path / "map-revision-7.png"
+    q = MapRevisionPngQueue()
+    q.enqueue(grid, path)
+    # Caller may mutate grid after enqueue; queue owns a snapshot.
+    grid.data[0] = 100
+    q.join()
+    assert path.is_file()
+    # Original free cell at (0,0) must still be free in the PNG (snapshot).
+    from PIL import Image
+
+    img = np.array(Image.open(path))
+    # flipud on write → image row 0 is grid row 1
+    assert img.shape == (2, 2)
+    # grid[0]=0 free → after flip appears at bottom row of image
+    assert int(img[1, 0]) == PNG_FREE
+
+
+def test_map_revision_png_gate_rate_limits():
+    """Mid-run PNGs must be rate-limited so GIL/disk cannot starve spin."""
+    from orb_slam_bringup.metrics_recorder import MapRevisionPngGate
+
+    gate = MapRevisionPngGate(min_interval_s=1.0)
+    assert gate.should_write(t=0.0, map_revision=1) is True
+    assert gate.should_write(t=0.1, map_revision=2) is False
+    assert gate.should_write(t=0.9, map_revision=3) is False
+    assert gate.should_write(t=1.0, map_revision=4) is True
+    assert gate.should_write(t=1.5, map_revision=5) is False
+    assert gate.should_write(t=2.1, map_revision=6) is True
+    # min_interval_s <= 0 disables limiting (write every revision)
+    gate2 = MapRevisionPngGate(min_interval_s=0.0)
+    assert gate2.should_write(t=0.0, map_revision=1) is True
+    assert gate2.should_write(t=0.01, map_revision=2) is True
+
+
+def test_event_jsonl_writer_keeps_handle_and_appends(tmp_path: Path):
+    path = tmp_path / "events.jsonl"
+    w = EventJsonlWriter(path)
+    w.append({"kind": "a", "t": 1.0})
+    w.append({"kind": "b", "t": 2.0})
+    w.close()
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["kind"] == "a"
+    assert json.loads(lines[1])["kind"] == "b"
 
 
 def test_metrics_top_level_keys():

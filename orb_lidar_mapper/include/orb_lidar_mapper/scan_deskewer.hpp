@@ -4,6 +4,7 @@
 #include <optional>
 #include <vector>
 
+#include "orb_lidar_mapper/imu_yaw_buffer.hpp"
 #include "orb_lidar_mapper/pose2.hpp"
 #include "orb_lidar_mapper/timed_pose_buffer.hpp"
 
@@ -59,10 +60,12 @@ class ScanDeskewer {
   static std::optional<std::vector<Ray2>> deskew(const ScanValue& scan,
                                                    const Pose2& committed_scan_base_pose,
                                                    const Pose2& base_to_lidar,
-                                                   const TimedPoseBuffer& wheels);
+                                                   const TimedPoseBuffer& wheels,
+                                                   const ImuYawBuffer* imu = nullptr);
   static std::optional<BracketedDeskewResult> deskewBracketed(
     const ScanValue& scan, const Pose2& base_to_lidar,
-    const TimedPoseBuffer& wheels, const ScanMotionBracket& bracket);
+    const TimedPoseBuffer& wheels, const ScanMotionBracket& bracket,
+    const ImuYawBuffer* imu = nullptr);
 };
 
 }  // namespace orb_lidar_mapper
