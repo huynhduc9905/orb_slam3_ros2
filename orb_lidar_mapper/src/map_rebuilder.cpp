@@ -238,7 +238,8 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         latest_successful_full_revision = request.trajectory->graph_revision;
         active_full.reset();
         published = {RebuildState::kPublished, snapshot->graph_revision, snapshot->map_revision,
-                     request.archive->scans.size(), snapshot->committed_scan_count, elapsed, {}};
+                     request.archive->scans.size(), snapshot->committed_scan_count, elapsed, {},
+                     /*full_rebuild=*/true};
       }
       invoke(snapshot, published);
       finishIdleIfQuiescent(request.generation, request.trajectory->graph_revision,

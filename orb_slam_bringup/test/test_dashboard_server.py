@@ -138,23 +138,93 @@ def test_model_replaces_revisioned_path_and_does_not_render_non_published():
     assert model.snapshot(0)["paths"]["corrected"] == []
 
 
-def test_static_traversal_is_not_served(tmp_path):
-    (tmp_path / "index.html").write_text("ok")
-    (tmp_path.parent / "web-secret").mkdir(exist_ok=True)
-    (tmp_path.parent / "web-secret" / "file").write_text("secret")
-
+def _serve(web_dir):
     class Stub:
-        _web_dir = tmp_path.resolve()
+        _web_dir = web_dir
         def state_json(self): return b"{}"
         def map_png(self): return b""
-    from orb_slam_bringup.dashboard_server import DashboardServer
-    httpd = __import__("http.server", fromlist=["ThreadingHTTPServer"]).ThreadingHTTPServer(
-        ("127.0.0.1", 0), Stub()._make_handler() if hasattr(Stub, "_make_handler") else DashboardServer._make_handler(Stub()))
+    return __import__("http.server", fromlist=["ThreadingHTTPServer"]).ThreadingHTTPServer(
+        ("127.0.0.1", 0), DashboardServer._make_handler(Stub()))
+
+
+def test_static_request_path_traversal_is_rejected(tmp_path):
+    # The only attacker-controlled input to the static handler is the
+    # request path; files under web_dir are placed at build/install time
+    # (see below), not by a runtime request. This test asserts a request
+    # cannot walk out of web_dir via "..".
+    (tmp_path / "index.html").write_text("ok")
+    secret = tmp_path.parent / "web-secret"
+    secret.mkdir(exist_ok=True)
+    (secret / "file").write_text("secret")
+
+    httpd = _serve(tmp_path.resolve())
     thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
     try:
         conn = HTTPConnection("127.0.0.1", httpd.server_port)
         conn.request("GET", "/../web-secret/file")
         assert conn.getresponse().status == 404
+    finally:
+        httpd.shutdown(); httpd.server_close(); thread.join()
+
+
+def test_static_nested_traversal_via_subdirectory_is_rejected(tmp_path):
+    (tmp_path / "index.html").write_text("ok")
+    sub = tmp_path / "assets"
+    sub.mkdir()
+    (sub / "app.js").write_text("//js")
+    secret = tmp_path.parent / "web-secret2"
+    secret.mkdir(exist_ok=True)
+    (secret / "file").write_text("secret")
+
+    httpd = _serve(tmp_path.resolve())
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", httpd.server_port)
+        conn.request("GET", "/assets/../../web-secret2/file")
+        assert conn.getresponse().status == 404
+    finally:
+        httpd.shutdown(); httpd.server_close(); thread.join()
+
+
+def test_static_symlink_install_layout_serves_per_file_symlinks(tmp_path):
+    # colcon --symlink-install places a *symlink per file* under the
+    # installed web_dir, each pointing at the real file elsewhere in the
+    # workspace (source tree or build/ dir) — this is the normal, expected
+    # layout, not an attacker-controlled escape, and must keep working.
+    source_root = tmp_path / "source-web"
+    source_root.mkdir()
+    (source_root / "index.html").write_text("ok")
+    installed_root = tmp_path / "installed-web"
+    installed_root.mkdir()
+    (installed_root / "index.html").symlink_to(source_root / "index.html")
+
+    httpd = _serve(installed_root.resolve())
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", httpd.server_port)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.read() == b"ok"
+    finally:
+        httpd.shutdown(); httpd.server_close(); thread.join()
+
+
+def test_static_root_symlink_serves_in_root_files(tmp_path):
+    source_root = tmp_path / "source-web"
+    source_root.mkdir()
+    (source_root / "index.html").write_text("ok")
+    installed_root = tmp_path / "installed-web"
+    installed_root.symlink_to(source_root, target_is_directory=True)
+
+    httpd = _serve(installed_root.resolve())
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", httpd.server_port)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        assert response.status == 200
+        assert response.read() == b"ok"
     finally:
         httpd.shutdown(); httpd.server_close(); thread.join()
 

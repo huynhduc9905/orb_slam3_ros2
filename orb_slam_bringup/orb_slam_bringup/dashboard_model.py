@@ -4,29 +4,46 @@ from __future__ import annotations
 
 import math
 import threading
-from array import array
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any
 
+import numpy as np
+
 
 MAX_UNMATCHED = 16
-MAX_CORRECTED_POINTS = 1500
+# Full-resolution trajectory history retained internally so the ENTIRE path
+# (start -> current) stays available for display. Points are kept at their
+# native density and are NEVER destructively re-strided in place, so the
+# rendered path cannot progressively facet into a polygon as it grows. Oldest
+# points are dropped only past this generous safety cap, which bounds memory on
+# pathologically long live sessions; a full bag replay (~13k odom samples) stays
+# well within it, so its whole path is retained.
+MAX_TRAIL_HISTORY = 20000
 MAX_PROVISIONAL_POINTS = 1500
-MAX_WHEEL_POINTS = 1500
-MAX_ORB_TRAIL = 1500
-MAX_ODOM_TRAIL = 1500
 MAX_KEYFRAMES = 4000
 MAX_LOOP_EDGES = 4000
-# Cap the point counts serialized into each /state poll so the dashboard stays
-# light/smooth at a high poll rate; internal trails keep full resolution.
-DISPLAY_TRAIL_POINTS = 600
+# Uniform decimation applied ONCE, at snapshot/display time, across the FULL
+# retained path. Because decimation happens once over the complete path (not
+# iteratively on the stored buffer), spacing is uniform end to end, so the whole
+# trajectory renders smoothly (no progressive faceting into a polygon) at this
+# point count. Kept moderate so the /state payload stays small enough to poll at
+# ~15 Hz over bandwidth-limited (e.g. relayed Tailscale) links without the
+# client falling behind.
+DISPLAY_TRAIL_POINTS = 1000
+# Graph node cloud + loop segments are decimated for the payload too: the loop
+# graph panel cannot resolve thousands of distinct nodes, and serializing all of
+# them (up to MAX_KEYFRAMES) dominated the /state payload (~84%) and json.dumps
+# cost. Loop segments are resolved against the FULL keyframe set first, then the
+# node cloud is decimated for display.
+DISPLAY_GRAPH_NODES = 600
+DISPLAY_LOOP_EDGES = 500
 STALE_AFTER_S = 2.0
 REVISION_STATE_PRIORITY = {"IDLE": 0, "BUILDING": 1, "PUBLISHED": 2, "FAILED": 3}
 assert MAX_UNMATCHED == 16
-assert MAX_CORRECTED_POINTS > 0 and MAX_PROVISIONAL_POINTS > 0 and MAX_WHEEL_POINTS > 0
+assert MAX_TRAIL_HISTORY > 0 and MAX_PROVISIONAL_POINTS > 0 and DISPLAY_TRAIL_POINTS > 0
 
 
 @dataclass(frozen=True)
@@ -96,7 +113,12 @@ def _finite(value: float, name: str) -> None:
 def _pose_json(pose: Pose2D | None) -> dict[str, float] | None:
     if pose is None:
         return None
-    return {"x": float(pose.x), "y": float(pose.y), "yaw": float(pose.yaw)}
+    # Round to ~0.1 mm / ~0.1 mrad. Visually lossless for the map viewer but
+    # roughly halves the /state payload: full-precision floats (~17 digits)
+    # otherwise dominate JSON size, which matters when polling at ~15 Hz over
+    # bandwidth-limited links.
+    return {"x": round(float(pose.x), 4), "y": round(float(pose.y), 4),
+            "yaw": round(float(pose.yaw), 4)}
 
 
 def _copy_map(value: MapEnvelope) -> MapEnvelope:
@@ -114,18 +136,25 @@ def _copy_map(value: MapEnvelope) -> MapEnvelope:
     if width <= 0 or height <= 0:
         raise ValueError("map dimensions must be positive")
     expected = width * height
-    if len(value.cells) != expected:
-        raise ValueError("map cell count does not match dimensions")
 
-    compact = array("b")
-    for index in range(expected):
-        cell = value.cells[index]
-        if (not isinstance(cell, Integral) or isinstance(cell, bool)
-                or not -1 <= int(cell) <= 100):
-            raise ValueError("map cells must be integers in [-1, 100]")
-        compact.append(int(cell))
-    # A read-only signed-byte view is compact, copied, and preserves -1 unknown cells.
-    compact_cells = memoryview(bytes(compact)).cast("b")
+    # Vectorized validation + compaction. The previous per-cell Python loop cost
+    # ~73 ms on a 448x448 map and ran on every incoming OccupancyGrid, pinning a
+    # core; numpy validates all cells in one pass (<1 ms). `len()` alone is not
+    # sufficient here: nested input can have the expected outer length but a
+    # different number of actual cells after compact serialization.
+    try:
+        arr = np.asarray(value.cells)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("map cells must be a one-dimensional array matching dimensions") from exc
+    if arr.ndim != 1 or arr.size != expected:
+        raise ValueError("map cells must be a one-dimensional array matching dimensions")
+    if arr.dtype == np.bool_ or not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError("map cells must be integers in [-1, 100]")
+    if arr.size and (int(arr.min()) < -1 or int(arr.max()) > 100):
+        raise ValueError("map cells must be integers in [-1, 100]")
+    # A read-only signed-byte view is compact, copied (tobytes() never aliases the
+    # possibly-mutable source), and preserves -1 unknown cells.
+    compact_cells = memoryview(arr.astype(np.int8).tobytes()).cast("b")
     return MapEnvelope(tuple(value.stamp), resolution, origin_x, origin_y,
                        width, height, compact_cells)
 
@@ -156,7 +185,7 @@ class DashboardModel:
         self._wheel_stamp: float | None = None
         self._corrected: list[Pose2D] = []
         self._corrected_revision = 0
-        self._fallback_trail: list[Pose2D] = []
+        self._fallback_trail: deque[Pose2D] = deque(maxlen=MAX_TRAIL_HISTORY)
         self._provisional: list[tuple[float, float]] = []
         self._loss_orb_anchor: Pose2D | None = None
         self._loss_wheel_anchor: Pose2D | None = None
@@ -165,8 +194,8 @@ class DashboardModel:
         self._loss_event_seen = False
         self._relocalized_event_seen = False
         # Separate real-time trajectory windows (independent of loss-recovery).
-        self._orb_trail: list[Pose2D] = []
-        self._odom_trail: list[Pose2D] = []
+        self._orb_trail: deque[Pose2D] = deque(maxlen=MAX_TRAIL_HISTORY)
+        self._odom_trail: deque[Pose2D] = deque(maxlen=MAX_TRAIL_HISTORY)
         # Loop-closure connectivity: keyframe node positions + loop edge pairs.
         self._graph_revision = 0
         self._graph_active_connected = False
@@ -235,7 +264,10 @@ class DashboardModel:
         for point in points:
             _finite_pose(point)
         with self._lock:
-            self._corrected = bounded_points(list(points), MAX_CORRECTED_POINTS)
+            # Keep the corrected path at full resolution; it is decimated once,
+            # uniformly, at display time so the whole corrected trajectory stays
+            # smooth. Cap only past the generous safety history bound.
+            self._corrected = list(points)[-MAX_TRAIL_HISTORY:]
             self._corrected_revision = int(graph_revision)
 
     def update_tracked(self, state: str, pose: Pose2D | None, keypoints: int, stamp_s: float) -> None:
@@ -249,8 +281,9 @@ class DashboardModel:
             self._tracked_keypoints = int(keypoints)
             self._tracked_stamp = float(stamp_s)
             if pose is not None:
+                # deque(maxlen=...) drops only the oldest point past the safety
+                # cap; survivors keep native spacing (no in-place re-striding).
                 self._orb_trail.append(pose)
-                self._orb_trail = bounded_points(self._orb_trail, MAX_ORB_TRAIL)
 
     def update_wheel(self, pose: Pose2D, stamp_s: float) -> None:
         _finite_pose(pose)
@@ -259,13 +292,12 @@ class DashboardModel:
             self._wheel_pose = pose
             self._wheel_stamp = float(stamp_s)
             # Always accumulate the raw odometry trajectory for the odom window.
+            # deque(maxlen=...) keeps native spacing; no in-place re-striding.
             self._odom_trail.append(pose)
-            self._odom_trail = bounded_points(self._odom_trail, MAX_ODOM_TRAIL)
             if self._loss_event_seen and self._loss_orb_anchor is not None and self._loss_wheel_anchor is not None:
                 self._fallback_pose = compose(self._loss_orb_anchor,
                                                compose(inverse(self._loss_wheel_anchor), pose))
                 self._fallback_trail.append(self._fallback_pose)
-                self._fallback_trail = bounded_points(self._fallback_trail, MAX_WHEEL_POINTS)
 
     def update_graph(self, graph_revision: int, active_connected: bool,
                      keyframes: list[tuple[int, float, float]],
@@ -290,7 +322,10 @@ class DashboardModel:
             self._loss_orb_anchor = self._tracked_pose
             self._loss_wheel_anchor = self._wheel_pose
             self._fallback_pose = self._tracked_pose
-            self._fallback_trail = ([self._tracked_pose] if self._tracked_pose is not None else [])
+            self._fallback_trail = deque(
+                [self._tracked_pose] if self._tracked_pose is not None else [],
+                maxlen=MAX_TRAIL_HISTORY,
+            )
 
     def mark_relocalized(self, graph_revision: int, stamp_s: float) -> None:
         _finite(stamp_s, "stamp_s")
@@ -312,7 +347,7 @@ class DashboardModel:
                 revision.graph_revision < self._recovery_graph_revision):
             return
         self._fallback_pose = None
-        self._fallback_trail = []
+        self._fallback_trail = deque(maxlen=MAX_TRAIL_HISTORY)
         self._loss_orb_anchor = None
         self._loss_wheel_anchor = None
         self._recovery_graph_revision = None
@@ -337,9 +372,14 @@ class DashboardModel:
             latest = self._latest_revision
             visible_map = self._visible_map
             visible_revision = self._visible_revision_envelope
+            # Decimate uniformly ONCE, over the full retained path, at display
+            # time. Because the stored trails were never re-strided in place,
+            # spacing here is uniform end to end (no dense-recent/sparse-old
+            # gradient), so the rendered path stays smooth over its whole length.
+            fallback_trail = bounded_points(list(self._fallback_trail), DISPLAY_TRAIL_POINTS)
             fallback = {"active": self._fallback_pose is not None,
                         "pose": _pose_json(self._fallback_pose),
-                        "trail": [_pose_json(p) for p in self._fallback_trail]}
+                        "trail": [_pose_json(p) for p in fallback_trail]}
             kf_pos = {i: (x, y) for i, x, y in self._keyframes}
             loop_segments = []
             for a, b in self._loop_edges:
@@ -347,17 +387,20 @@ class DashboardModel:
                     ax, ay = kf_pos[a]; bx, by = kf_pos[b]
                     loop_segments.append({"from": {"x": ax, "y": ay},
                                           "to": {"x": bx, "y": by}})
+                    if len(loop_segments) >= DISPLAY_LOOP_EDGES:
+                        break
+            display_keyframes = bounded_points(self._keyframes, DISPLAY_GRAPH_NODES)
             return {
                 "state": self._state,
                 "tracking": {"state": self._state, "pose": _pose_json(self._tracked_pose),
                               "keypoints": self._tracked_keypoints, "stamp_s": self._tracked_stamp},
                 "odom": {"pose": _pose_json(self._wheel_pose),
-                         "trail": [_pose_json(p) for p in bounded_points(self._odom_trail, DISPLAY_TRAIL_POINTS)]},
+                         "trail": [_pose_json(p) for p in bounded_points(list(self._odom_trail), DISPLAY_TRAIL_POINTS)]},
                 "orb": {"pose": _pose_json(self._tracked_pose),
-                        "trail": [_pose_json(p) for p in bounded_points(self._orb_trail, DISPLAY_TRAIL_POINTS)]},
+                        "trail": [_pose_json(p) for p in bounded_points(list(self._orb_trail), DISPLAY_TRAIL_POINTS)]},
                 "graph": {"revision": self._graph_revision,
                           "active_connected": self._graph_active_connected,
-                          "keyframes": [{"id": i, "x": x, "y": y} for i, x, y in self._keyframes],
+                          "keyframes": [{"id": i, "x": x, "y": y} for i, x, y in display_keyframes],
                           "loops": loop_segments},
                 "health": {"tracking_stale": tracking_stale, "wheel_stale": wheel_stale,
                             "map_stale": latest is None},
@@ -374,7 +417,7 @@ class DashboardModel:
                                   "committed_scan_count": latest.committed_scan_count}
                                  if latest is not None else None),
                 "paths": {"corrected": [_pose_json(p) for p in bounded_points(self._corrected, DISPLAY_TRAIL_POINTS)],
-                          "wheel": [_pose_json(p) for p in self._fallback_trail],
+                          "wheel": [_pose_json(p) for p in fallback_trail],
                           "provisional": [[x, y] for x, y in self._provisional]},
                 "fallback": fallback,
             }

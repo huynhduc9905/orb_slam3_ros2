@@ -15,7 +15,7 @@ import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy, qos_profile_sensor_data)
@@ -308,9 +308,28 @@ class DashboardServer(Node):
                     png = server.map_png()
                     self._send(200 if png else 503, "image/png" if png else "text/plain", png or b"no map yet", True); return
                 rel = "index.html" if path in ("/", "") else path.lstrip("/")
-                fpath = (web_dir / rel).resolve()
-                try: fpath.relative_to(web_dir)
-                except ValueError: self._send(404, "text/plain", b"not found"); return
+                # web_dir is resolved once at startup. With colcon
+                # --symlink-install, every FILE under web_dir is itself a
+                # symlink back into the source tree by design, so fully
+                # resolving the candidate file (following that symlink) and
+                # checking containment against web_dir would reject every
+                # legitimate file. Instead we resolve only the *directory*
+                # component of the request (collapsing any ".." segments)
+                # and require that resolved directory to be web_dir itself
+                # or a real descendant of it; the final filename is then
+                # joined unresolved, so its own symlink target is irrelevant
+                # to the traversal check. This still blocks "../" escapes,
+                # which escape via the directory component, not the leaf.
+                rel_path = FsPath(rel)
+                if rel_path.is_absolute() or not rel_path.name:
+                    self._send(404, "text/plain", b"not found"); return
+                try:
+                    dir_resolved = (web_dir / rel_path.parent).resolve()
+                    if dir_resolved != web_dir:
+                        dir_resolved.relative_to(web_dir)
+                except (OSError, ValueError):
+                    self._send(404, "text/plain", b"not found"); return
+                fpath = dir_resolved / rel_path.name
                 if not fpath.is_file(): self._send(404, "text/plain", b"not found"); return
                 ctype = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png"}.get(fpath.suffix, "application/octet-stream")
                 self._send(200, ctype, fpath.read_bytes())
@@ -324,7 +343,13 @@ class DashboardServer(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = DashboardServer()
-    executor = MultiThreadedExecutor()
+    # SingleThreadedExecutor: a MultiThreadedExecutor (even capped) busy-loops
+    # rebuilding its wait set in Python whenever a thread wakes on a message
+    # whose MutuallyExclusive callback group is already running on another
+    # thread, pegging a core. One thread drains callbacks sequentially and
+    # blocks in rcl_wait when idle. The 1 Hz, few-ms map render briefly sharing
+    # this thread with pose/state updates is imperceptible at the 15 Hz poll.
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try: executor.spin()
     except KeyboardInterrupt: pass

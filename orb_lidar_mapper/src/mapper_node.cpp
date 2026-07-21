@@ -214,7 +214,10 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   max_scan_yaw_change_rad_(declare_parameter("max_scan_yaw_change_rad", 0.005)),
   visual_anchor_max_gap_ms_(declare_parameter("visual_anchor_max_gap_ms", 200.0)),
   pending_scan_timeout_s_(declare_parameter("pending_scan_timeout_s", 2.0)),
-  pending_scan_limit_(declare_parameter("pending_scan_limit", 200)) {
+  pending_scan_limit_(declare_parameter("pending_scan_limit", 200)),
+  publish_wheel_path_(declare_parameter("publish_wheel_path", false)),
+  wheel_path_max_points_(declare_parameter("wheel_path_max_points", 1500)),
+  map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)) {
 
   if (!std::isfinite(hit_range_max_m_) || !std::isfinite(hit_log_odds_) ||
       !std::isfinite(miss_log_odds_) || hit_range_max_m_ <= 0.0 ||
@@ -232,6 +235,12 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       pending_scan_timeout_s_ >
         static_cast<double>(std::numeric_limits<int64_t>::max()) / 1e9) {
     throw std::invalid_argument("scan gating and pending-queue parameters are invalid");
+  }
+  if (!std::isfinite(map_publish_min_interval_s_) || map_publish_min_interval_s_ < 0.0) {
+    throw std::invalid_argument("map_publish_min_interval_s must be finite and non-negative");
+  }
+  if (wheel_path_max_points_ <= 0) {
+    throw std::invalid_argument("wheel_path_max_points must be positive");
   }
 
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
@@ -276,8 +285,10 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       "/orb_lidar/corrected_path", snapshot_qos);
   corrected_path_rev_pub_ = create_publisher<orb_slam3_msgs::msg::RevisionedPath>(
       "/orb_lidar/corrected_path_revisioned", snapshot_qos);
-  wheel_path_pub_ = create_publisher<nav_msgs::msg::Path>(
-      "/orb_lidar/wheel_path", reliable10);
+  if (publish_wheel_path_) {
+    wheel_path_pub_ = create_publisher<nav_msgs::msg::Path>(
+        "/orb_lidar/wheel_path", reliable10);
+  }
   provisional_scan_pub_ = create_publisher<visualization_msgs::msg::Marker>(
       "/orb_lidar/provisional_scan", reliable10);
   committed_scan_pub_ = create_publisher<visualization_msgs::msg::Marker>(
@@ -331,18 +342,25 @@ void MapperNode::onOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg) {
   traj_->addWheel(sample);
   wheel_buf_->push(sample);
 
-  // Wheel path
-  geometry_msgs::msg::PoseStamped ps;
-  ps.header = msg->header;
-  ps.header.frame_id = map_frame_;
-  ps.pose = msg->pose.pose;
-  wheel_poses_.push_back(ps);
+  // The legacy Foxglove wheel-path stream is opt-in and bounded. The active
+  // dashboard and metrics recorder consume raw odometry, so the default path
+  // does no allocation, copying, or publication here.
+  if (wheel_path_pub_) {
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header = msg->header;
+    ps.header.frame_id = map_frame_;
+    ps.pose = msg->pose.pose;
+    wheel_poses_.push_back(ps);
+    while (wheel_poses_.size() > static_cast<std::size_t>(wheel_path_max_points_)) {
+      wheel_poses_.pop_front();
+    }
 
-  nav_msgs::msg::Path path;
-  path.header.stamp = msg->header.stamp;
-  path.header.frame_id = map_frame_;
-  path.poses = wheel_poses_;
-  wheel_path_pub_->publish(path);
+    nav_msgs::msg::Path path;
+    path.header.stamp = msg->header.stamp;
+    path.header.frame_id = map_frame_;
+    path.poses.assign(wheel_poses_.begin(), wheel_poses_.end());
+    wheel_path_pub_->publish(path);
+  }
 
   processPendingScansLocked();
 }
@@ -726,6 +744,27 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
 void MapperNode::publishMapAndRevision(std::shared_ptr<const MapSnapshot> snapshot,
                                         const RebuildStatus& status) {
   if (!snapshot) return;
+
+  // Viewer-side broadcast throttle: the internal grid updates on every commit,
+  // but re-broadcasting the full OccupancyGrid at the incremental rate (~18 Hz
+  // x ~200 KB) saturated subscribers' DDS receive path. Cap the heavy grid +
+  // its paired revision to at most one per map_publish_min_interval_s of wall
+  // time. Full rebuilds (loop closure) and failures always publish so the
+  // corrected/terminal map is never dropped, and grid+revision are gated
+  // together so every published pair stays coherent (matching stamps).
+  const bool always_publish =
+      status.full_rebuild || status.state == RebuildState::kFailed;
+  if (!always_publish && map_publish_min_interval_s_ > 0.0) {
+    const auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto interval_ns =
+        static_cast<std::int64_t>(map_publish_min_interval_s_ * 1e9);
+    const std::int64_t last_ns = last_map_grid_publish_ns_.load(std::memory_order_relaxed);
+    if (last_ns != std::numeric_limits<std::int64_t>::min() &&
+        now_ns - last_ns < interval_ns) {
+      return;  // throttled: skip both grid and revision this cycle
+    }
+    last_map_grid_publish_ns_.store(now_ns, std::memory_order_relaxed);
+  }
 
   mapper_node_test_hooks::beforePublish();
 

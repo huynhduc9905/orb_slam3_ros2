@@ -67,13 +67,18 @@ function resizeAll() {
 }
 window.addEventListener("resize", resizeAll);
 
-// ── map image loading (only when revision changes) ───────────────────────────
-function maybeReloadMap(meta, actualRevision) {
-  if (!meta || meta.width <= 0) return;
-  const visibleRevision = Number(meta.revision);
-  const revision = Number(actualRevision);
-  if (!Number.isFinite(visibleRevision) || !Number.isFinite(revision)) return;
-  if (visibleRevision !== revision) return;
+// ── map image loading (only when the rendered/visible revision advances) ─────
+// Load /map.png whenever the VISIBLE (server-rendered) map revision changes.
+// It must NOT be gated on the visible revision equalling the latest revision:
+// during continuous mapping the 1 Hz render always trails the fast-advancing
+// latest revision, so such a gate almost never opens and the map never shows.
+// The visible map is always a complete, valid render, and /map.png always
+// serves that visible map, so tracking the visible revision is both correct
+// and continuous (~1 Hz updates).
+function maybeReloadMap(meta) {
+  if (!meta || !meta.width || meta.width <= 0) return;
+  const revision = Number(meta.revision);
+  if (!Number.isFinite(revision)) return;
   if (revision === requestedRevision || revision === loadedRevision) return;
   const token = ++mapRequestToken;
   requestedRevision = revision;
@@ -161,15 +166,26 @@ function fitBounds(groups) {
   return { minX, minY, maxX, maxY };
 }
 
-// Draws into `canvas` fitting the union of points/nodes/pose to the view.
+function edgeEndpoints(edges) {
+  const endpoints = [];
+  for (const edge of edges || []) {
+    if (edge && edge.from && edge.to) endpoints.push(edge.from, edge.to);
+  }
+  return endpoints;
+}
+
+function panelBounds(points, nodes, pose, edges) {
+  return fitBounds([points, nodes, pose ? [pose] : [], edgeEndpoints(edges)]);
+}
+
+// Draws into `canvas` fitting the union of points/nodes/pose/edge endpoints to the view.
 function drawPanel(canvas, opts) {
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#0b0f14";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const pts = (opts.points || []).map(asXY);
   const nodes = opts.nodes || [];
-  const poseArr = opts.pose ? [opts.pose] : [];
-  const b = fitBounds([pts, nodes, poseArr]);
+  const b = panelBounds(pts, nodes, opts.pose, opts.edges);
   if (!b) {
     ctx.fillStyle = "#334155"; ctx.font = "13px system-ui";
     ctx.fillText("waiting…", 10, 20);
@@ -357,7 +373,7 @@ function applyState(st) {
   recovery.textContent = "RECOVERY"; recovery.className = "badge status-warn";
   el("rebuild").textContent = rev.state === "BUILDING" ? "BUILDING" : (rev.state === "FAILED" ? "FAILED" : "");
   el("waiting").style.display = st.map && st.map.width > 0 ? "none" : "flex";
-  maybeReloadMap(st.map, rev.map_revision);
+  maybeReloadMap(st.map);
   pushHistory(st);
   draw();
   renderEvents(st.events);
@@ -369,6 +385,12 @@ function setDisconnected() {
 }
 
 // ── poll loop ──────────────────────────────────────────────────────────────────
+// Self-scheduling with an in-flight guard: the next /state fetch is scheduled
+// only AFTER the current one finishes drawing. On a fast link this holds ~15 Hz;
+// on a slow/saturated link (e.g. relayed Tailscale) it backs off gracefully
+// instead of stacking overlapping requests, which would otherwise cascade into
+// unbounded lag and starve the separate /map.png fetch.
+const POLL_INTERVAL_MS = 66; // ~15 Hz ceiling for smooth realtime pose windows
 async function poll() {
   try {
     const res = await fetch("/state", { cache: "no-store" });
@@ -376,9 +398,10 @@ async function poll() {
     applyState(await res.json());
   } catch (e) {
     setDisconnected();
+  } finally {
+    setTimeout(poll, POLL_INTERVAL_MS);
   }
 }
 
 resizeAll();
 poll();
-setInterval(poll, 66); // ~15 Hz for smooth realtime pose windows

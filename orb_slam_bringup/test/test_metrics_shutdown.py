@@ -29,9 +29,7 @@ def test_main_treats_external_shutdown_as_clean_and_flushes(monkeypatch):
     fake_rclpy.ok = lambda: True
     fake_rclpy.shutdown = lambda: calls.append("shutdown")
 
-    class FakeMultiThreadedExecutor:
-        def __init__(self, num_threads=None):
-            pass
+    class FakeSingleThreadedExecutor:
         def add_node(self, node):
             pass
         def spin(self):
@@ -41,7 +39,7 @@ def test_main_treats_external_shutdown_as_clean_and_flushes(monkeypatch):
 
     fake_executors = types.ModuleType("rclpy.executors")
     fake_executors.ExternalShutdownException = ExternalShutdownException
-    fake_executors.MultiThreadedExecutor = FakeMultiThreadedExecutor
+    fake_executors.SingleThreadedExecutor = FakeSingleThreadedExecutor
     fake_rclpy.executors = fake_executors
 
     def destroy_node():
