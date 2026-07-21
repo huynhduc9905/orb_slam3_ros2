@@ -16,6 +16,13 @@ MAX_UNMATCHED = 16
 MAX_CORRECTED_POINTS = 1500
 MAX_PROVISIONAL_POINTS = 1500
 MAX_WHEEL_POINTS = 1500
+MAX_ORB_TRAIL = 1500
+MAX_ODOM_TRAIL = 1500
+MAX_KEYFRAMES = 4000
+MAX_LOOP_EDGES = 4000
+# Cap the point counts serialized into each /state poll so the dashboard stays
+# light/smooth at a high poll rate; internal trails keep full resolution.
+DISPLAY_TRAIL_POINTS = 600
 STALE_AFTER_S = 2.0
 REVISION_STATE_PRIORITY = {"IDLE": 0, "BUILDING": 1, "PUBLISHED": 2, "FAILED": 3}
 assert MAX_UNMATCHED == 16
@@ -157,6 +164,14 @@ class DashboardModel:
         self._recovery_graph_revision: int | None = None
         self._loss_event_seen = False
         self._relocalized_event_seen = False
+        # Separate real-time trajectory windows (independent of loss-recovery).
+        self._orb_trail: list[Pose2D] = []
+        self._odom_trail: list[Pose2D] = []
+        # Loop-closure connectivity: keyframe node positions + loop edge pairs.
+        self._graph_revision = 0
+        self._graph_active_connected = False
+        self._keyframes: list[tuple[int, float, float]] = []
+        self._loop_edges: list[tuple[int, int]] = []
 
     def ingest_map(self, value: MapEnvelope) -> None:
         copied = _copy_map(value)
@@ -233,6 +248,9 @@ class DashboardModel:
             self._tracked_pose = pose
             self._tracked_keypoints = int(keypoints)
             self._tracked_stamp = float(stamp_s)
+            if pose is not None:
+                self._orb_trail.append(pose)
+                self._orb_trail = bounded_points(self._orb_trail, MAX_ORB_TRAIL)
 
     def update_wheel(self, pose: Pose2D, stamp_s: float) -> None:
         _finite_pose(pose)
@@ -240,11 +258,27 @@ class DashboardModel:
         with self._lock:
             self._wheel_pose = pose
             self._wheel_stamp = float(stamp_s)
+            # Always accumulate the raw odometry trajectory for the odom window.
+            self._odom_trail.append(pose)
+            self._odom_trail = bounded_points(self._odom_trail, MAX_ODOM_TRAIL)
             if self._loss_event_seen and self._loss_orb_anchor is not None and self._loss_wheel_anchor is not None:
                 self._fallback_pose = compose(self._loss_orb_anchor,
                                                compose(inverse(self._loss_wheel_anchor), pose))
                 self._fallback_trail.append(self._fallback_pose)
                 self._fallback_trail = bounded_points(self._fallback_trail, MAX_WHEEL_POINTS)
+
+    def update_graph(self, graph_revision: int, active_connected: bool,
+                     keyframes: list[tuple[int, float, float]],
+                     loop_edges: list[tuple[int, int]]) -> None:
+        for _id, x, y in keyframes:
+            _finite(x, "keyframe.x")
+            _finite(y, "keyframe.y")
+        with self._lock:
+            self._graph_revision = int(graph_revision)
+            self._graph_active_connected = bool(active_connected)
+            self._keyframes = [(int(i), float(x), float(y))
+                               for i, x, y in keyframes[:MAX_KEYFRAMES]]
+            self._loop_edges = [(int(a), int(b)) for a, b in loop_edges[:MAX_LOOP_EDGES]]
 
     def start_loss(self, graph_revision: int, stamp_s: float) -> None:
         _finite(stamp_s, "stamp_s")
@@ -306,10 +340,25 @@ class DashboardModel:
             fallback = {"active": self._fallback_pose is not None,
                         "pose": _pose_json(self._fallback_pose),
                         "trail": [_pose_json(p) for p in self._fallback_trail]}
+            kf_pos = {i: (x, y) for i, x, y in self._keyframes}
+            loop_segments = []
+            for a, b in self._loop_edges:
+                if a in kf_pos and b in kf_pos:
+                    ax, ay = kf_pos[a]; bx, by = kf_pos[b]
+                    loop_segments.append({"from": {"x": ax, "y": ay},
+                                          "to": {"x": bx, "y": by}})
             return {
                 "state": self._state,
                 "tracking": {"state": self._state, "pose": _pose_json(self._tracked_pose),
                               "keypoints": self._tracked_keypoints, "stamp_s": self._tracked_stamp},
+                "odom": {"pose": _pose_json(self._wheel_pose),
+                         "trail": [_pose_json(p) for p in bounded_points(self._odom_trail, DISPLAY_TRAIL_POINTS)]},
+                "orb": {"pose": _pose_json(self._tracked_pose),
+                        "trail": [_pose_json(p) for p in bounded_points(self._orb_trail, DISPLAY_TRAIL_POINTS)]},
+                "graph": {"revision": self._graph_revision,
+                          "active_connected": self._graph_active_connected,
+                          "keyframes": [{"id": i, "x": x, "y": y} for i, x, y in self._keyframes],
+                          "loops": loop_segments},
                 "health": {"tracking_stale": tracking_stale, "wheel_stale": wheel_stale,
                             "map_stale": latest is None},
                 "map": ({"resolution": visible_map.resolution, "origin_x": visible_map.origin_x,
@@ -324,7 +373,7 @@ class DashboardModel:
                                   "map_revision": latest.map_revision,
                                   "committed_scan_count": latest.committed_scan_count}
                                  if latest is not None else None),
-                "paths": {"corrected": [_pose_json(p) for p in self._corrected],
+                "paths": {"corrected": [_pose_json(p) for p in bounded_points(self._corrected, DISPLAY_TRAIL_POINTS)],
                           "wheel": [_pose_json(p) for p in self._fallback_trail],
                           "provisional": [[x, y] for x, y in self._provisional]},
                 "fallback": fallback,

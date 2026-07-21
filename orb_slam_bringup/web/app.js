@@ -1,27 +1,42 @@
-// Minimal custom dashboard: polls /state (10 Hz) and reloads /map.png on new
-// map revision. No foxglove, no build step. Read-only.
+// Custom read-only dashboard. Polls /state (~15 Hz) for smooth realtime pose
+// windows and reloads /map.png only when the map revision changes. No build
+// step, no external bridge. The reported track/odom rates are the BACKEND
+// cadence (from message header stamps), not what this page receives.
 "use strict";
 
-const canvas = document.getElementById("map");
-const ctx = canvas.getContext("2d");
 const el = (id) => document.getElementById(id);
+const canvases = {
+  map: el("map"),
+  odom: el("odom"),
+  orb: el("orb"),
+  corrected: el("corrected"),
+  loopgraph: el("loopgraph"),
+};
+const mapCtx = canvases.map.getContext("2d");
 
-let mapImg = null;          // loaded <img> of /map.png
-let mapMeta = null;         // {resolution, origin_x, origin_y, width, height, revision}
+let mapImg = null;
+let mapMeta = null;
 let requestedRevision = -1;
 let loadedRevision = -1;
 let mapRequestToken = 0;
 let lastState = null;
 
-// ── canvas sizing ────────────────────────────────────────────────────────────
-function resizeCanvas() {
+// ── canvas sizing (DPR-aware) ────────────────────────────────────────────────
+function sizeCanvas(canvas) {
   const r = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.round(r.width * dpr));
-  canvas.height = Math.max(1, Math.round(r.height * dpr));
+  const w = Math.max(1, Math.round(r.width * dpr));
+  const h = Math.max(1, Math.round(r.height * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+function resizeAll() {
+  for (const c of Object.values(canvases)) sizeCanvas(c);
   draw();
 }
-window.addEventListener("resize", resizeCanvas);
+window.addEventListener("resize", resizeAll);
 
 // ── map image loading (only when revision changes) ───────────────────────────
 function maybeReloadMap(meta, actualRevision) {
@@ -31,7 +46,6 @@ function maybeReloadMap(meta, actualRevision) {
   if (!Number.isFinite(visibleRevision) || !Number.isFinite(revision)) return;
   if (visibleRevision !== revision) return;
   if (revision === requestedRevision || revision === loadedRevision) return;
-
   const token = ++mapRequestToken;
   requestedRevision = revision;
   const requestedMeta = { ...meta };
@@ -41,106 +55,148 @@ function maybeReloadMap(meta, actualRevision) {
     mapImg = img;
     mapMeta = requestedMeta;
     loadedRevision = revision;
-    draw();
+    drawMap();
   };
   img.onerror = () => {
-    if (token === mapRequestToken && requestedRevision === revision) {
-      requestedRevision = -1;
-    }
+    if (token === mapRequestToken && requestedRevision === revision) requestedRevision = -1;
   };
   img.src = "/map.png?rev=" + revision;
 }
 
-// ── world <-> screen transform ───────────────────────────────────────────────
-// The PNG is already flipped so its row 0 is world +y (top). We fit the map's
-// world AABB into the canvas with letterboxing; overlays share the transform.
-function computeView() {
-  if (!mapMeta || mapMeta.width <= 0) return null;
+// ── map panel (uses the map's own world AABB) ────────────────────────────────
+function drawMap() {
+  const canvas = canvases.map;
+  mapCtx.fillStyle = "#0b0f14";
+  mapCtx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!mapMeta || mapMeta.width <= 0 || !mapImg) return;
   const res = mapMeta.resolution;
   const worldW = mapMeta.width * res;
   const worldH = mapMeta.height * res;
-  const pad = 0.95;
-  const scale = Math.min(canvas.width / worldW, canvas.height / worldH) * pad;
-  const drawW = worldW * scale;
-  const drawH = worldH * scale;
-  const offX = (canvas.width - drawW) / 2;
-  const offY = (canvas.height - drawH) / 2;
-  return { res, worldW, worldH, scale, drawW, drawH, offX, offY };
-}
-
-function worldToScreen(v, x, y) {
-  // x grows right; y grows up in world -> down on screen.
-  const sx = v.offX + (x - mapMeta.origin_x) * v.scale;
-  const sy = v.offY + (v.worldH - (y - mapMeta.origin_y)) * v.scale;
-  return [sx, sy];
-}
-
-// ── draw ──────────────────────────────────────────────────────────────────────
-function draw() {
-  ctx.fillStyle = "#0b0f14";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  const v = computeView();
-  if (!v || !mapImg) return;
-
-  // Map raster (PNG already y-up oriented) into the letterboxed rect.
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(mapImg, v.offX, v.offY, v.drawW, v.drawH);
-
+  const scale = Math.min(canvas.width / worldW, canvas.height / worldH) * 0.95;
+  const drawW = worldW * scale, drawH = worldH * scale;
+  const offX = (canvas.width - drawW) / 2, offY = (canvas.height - drawH) / 2;
+  const toS = (x, y) => [offX + (x - mapMeta.origin_x) * scale,
+                         offY + (worldH - (y - mapMeta.origin_y)) * scale];
+  mapCtx.imageSmoothingEnabled = false;
+  mapCtx.drawImage(mapImg, offX, offY, drawW, drawH);
   const st = lastState;
   if (!st) return;
-
-  function drawLine(points, color) {
-    if (!points || points.length < 2) return;
-    ctx.strokeStyle = color; ctx.lineWidth = Math.max(2, 0.03 * v.scale);
-    ctx.beginPath();
-    points.forEach((point, i) => {
+  const stroke = (pts, color) => {
+    if (!pts || pts.length < 2) return;
+    mapCtx.strokeStyle = color; mapCtx.lineWidth = Math.max(1.5, 0.03 * scale);
+    mapCtx.beginPath();
+    pts.forEach((point, i) => {
       const p = Array.isArray(point) ? { x: point[0], y: point[1] } : point;
-      const [sx, sy] = worldToScreen(v, p.x, p.y);
-      i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
+      const [sx, sy] = toS(p.x, p.y);
+      i === 0 ? mapCtx.moveTo(sx, sy) : mapCtx.lineTo(sx, sy);
     });
-    ctx.stroke();
-  }
-
-  // Layer order is part of the direct dashboard contract.
-  drawLine((st.paths && st.paths.corrected) || [], "#38bdf8");
-  drawLine((st.fallback && st.fallback.trail) || [], "#facc15");
-  const provisional = (st.paths && st.paths.provisional) || [];
-  ctx.fillStyle = "#facc15";
-  provisional.forEach((point) => {
-    const [sx, sy] = worldToScreen(v, point[0], point[1]);
-    ctx.beginPath(); ctx.arc(sx, sy, Math.max(2, 0.06 * v.scale), 0, Math.PI * 2); ctx.fill();
+    mapCtx.stroke();
+  };
+  stroke((st.paths && st.paths.corrected) || [], "#38bdf8");
+  stroke((st.fallback && st.fallback.trail) || [], "#facc15");
+  const prov = (st.paths && st.paths.provisional) || [];
+  mapCtx.fillStyle = "#facc15";
+  prov.forEach((pt) => {
+    const [sx, sy] = toS(pt[0], pt[1]);
+    mapCtx.beginPath(); mapCtx.arc(sx, sy, Math.max(2, 0.06 * scale), 0, Math.PI * 2); mapCtx.fill();
   });
-
-  // The legacy path is retained as a compatibility fallback for old state fixtures.
-  const path = st.path || [];
-  if (path.length > 1 && !(st.paths && st.paths.corrected)) {
-    ctx.strokeStyle = "#f59e0b";
-    ctx.lineWidth = Math.max(1, 0.03 * v.scale);
-    ctx.beginPath();
-    for (let i = 0; i < path.length; i++) {
-      const [sx, sy] = worldToScreen(v, path[i][0], path[i][1]);
-      i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
-    }
-    ctx.stroke();
-  }
-
-  // Robot pose marker.
   const p = st.tracking && st.tracking.pose;
-  if (p) {
-    const [sx, sy] = worldToScreen(v, p.x, p.y);
-    const r = Math.max(4, 0.12 * v.scale);
-    ctx.fillStyle = "#22c55e";
+  if (p) drawPoseMarker(mapCtx, toS(p.x, p.y), p.yaw, "#22c55e", Math.max(4, 0.12 * scale));
+}
+
+function drawPoseMarker(ctx, [sx, sy], yaw, color, r) {
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
+  if (typeof yaw === "number") {
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + Math.cos(yaw) * r * 2, sy - Math.sin(yaw) * r * 2); ctx.stroke();
+  }
+}
+
+// ── generic self-scaling trajectory / graph panel ────────────────────────────
+function asXY(p) { return Array.isArray(p) ? { x: p[0], y: p[1] } : p; }
+
+function fitBounds(groups) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const g of groups) {
+    for (const raw of g || []) {
+      if (raw == null) continue;
+      const p = asXY(raw);
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+// Draws into `canvas` fitting the union of points/nodes/pose to the view.
+function drawPanel(canvas, opts) {
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0b0f14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const pts = (opts.points || []).map(asXY);
+  const nodes = opts.nodes || [];
+  const poseArr = opts.pose ? [opts.pose] : [];
+  const b = fitBounds([pts, nodes, poseArr]);
+  if (!b) {
+    ctx.fillStyle = "#334155"; ctx.font = "13px system-ui";
+    ctx.fillText("waiting…", 10, 20);
+    return;
+  }
+  const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
+  const half = Math.max((b.maxX - b.minX), (b.maxY - b.minY), 0.5) * 0.6;
+  const W = canvas.width, H = canvas.height;
+  const scale = Math.min(W, H) / (2 * half);
+  const toS = (x, y) => [W / 2 + (x - cx) * scale, H / 2 - (y - cy) * scale];
+
+  // origin crosshair
+  const [ox, oy] = toS(0, 0);
+  ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(ox - 8, oy); ctx.lineTo(ox + 8, oy);
+  ctx.moveTo(ox, oy - 8); ctx.lineTo(ox, oy + 8); ctx.stroke();
+
+  if (opts.color && pts.length > 1) {
+    ctx.strokeStyle = opts.color; ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(sx, sy, r, 0, Math.PI * 2);
-    ctx.fill();
-    // heading (yaw): world y-up -> screen y-down, so negate sin.
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = Math.max(1, 0.04 * v.scale);
-    ctx.beginPath();
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(sx + Math.cos(p.yaw) * r * 2, sy - Math.sin(p.yaw) * r * 2);
+    pts.forEach((p, i) => { const [sx, sy] = toS(p.x, p.y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
     ctx.stroke();
   }
+  if (opts.edges) {
+    ctx.strokeStyle = "#f43f5e"; ctx.lineWidth = 1.5;
+    for (const e of opts.edges) {
+      const [ax, ay] = toS(e.from.x, e.from.y), [bx, by] = toS(e.to.x, e.to.y);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    }
+  }
+  if (nodes.length) {
+    ctx.fillStyle = opts.nodeColor || "#22d3ee";
+    for (const n of nodes) { const [sx, sy] = toS(n.x, n.y); ctx.beginPath(); ctx.arc(sx, sy, 1.6, 0, Math.PI * 2); ctx.fill(); }
+  }
+  if (opts.pose) drawPoseMarker(ctx, toS(opts.pose.x, opts.pose.y), opts.pose.yaw, opts.poseColor || "#22c55e", 5);
+  // scale bar (1 m)
+  ctx.strokeStyle = "#475569"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(10, H - 12); ctx.lineTo(10 + scale, H - 12); ctx.stroke();
+  ctx.fillStyle = "#64748b"; ctx.font = "11px system-ui"; ctx.fillText("1 m", 12, H - 16);
+}
+
+// ── draw everything from lastState ────────────────────────────────────────────
+function draw() {
+  drawMap();
+  const st = lastState || {};
+  const odom = st.odom || {};
+  const orb = st.orb || {};
+  const graph = st.graph || {};
+  drawPanel(canvases.odom, { points: odom.trail || [], pose: odom.pose, color: "#facc15", poseColor: "#facc15" });
+  drawPanel(canvases.orb, { points: orb.trail || [], pose: orb.pose, color: "#a78bfa", poseColor: "#a78bfa" });
+  drawPanel(canvases.corrected, {
+    points: (st.paths && st.paths.corrected) || [],
+    pose: (st.paths && st.paths.corrected && st.paths.corrected.length) ? st.paths.corrected[st.paths.corrected.length - 1] : null,
+    color: "#38bdf8", poseColor: "#38bdf8",
+  });
+  drawPanel(canvases.loopgraph, { nodes: graph.keyframes || [], edges: graph.loops || [], nodeColor: "#22d3ee" });
 }
 
 // ── status / events UI ────────────────────────────────────────────────────────
@@ -158,14 +214,10 @@ function renderEvents(events) {
   for (const e of events || []) {
     const li = document.createElement("li");
     const type = document.createElement("span");
-    type.className = "type";
-    type.textContent = e.type;
-    li.appendChild(type);
+    type.className = "type"; type.textContent = e.type; li.appendChild(type);
     if (e.detail) {
       const d = document.createElement("span");
-      d.className = "detail";
-      d.textContent = " — " + e.detail;
-      li.appendChild(d);
+      d.className = "detail"; d.textContent = " — " + e.detail; li.appendChild(d);
     }
     ul.appendChild(li);
   }
@@ -174,27 +226,29 @@ function renderEvents(events) {
 function applyState(st) {
   lastState = st;
   const conn = el("conn");
-  conn.textContent = "connected";
-  conn.className = "badge badge-connected";
-
+  conn.textContent = "connected"; conn.className = "badge badge-connected";
   const t = st.tracking || {};
   const trackBadge = el("track");
   trackBadge.textContent = t.state || "--";
   trackBadge.className = "badge " + trackClass(t.state);
-  el("trackHz").textContent = (t.hz ?? 0).toFixed(1);
-  el("odomHz").textContent = (st.odom && st.odom.hz != null ? st.odom.hz : 0).toFixed(1);
+  const trackHz = (t.hz ?? 0).toFixed(1);
+  const odomHz = (st.odom && st.odom.hz != null ? st.odom.hz : 0).toFixed(1);
+  el("trackHz").textContent = trackHz;
+  el("odomHz").textContent = odomHz;
+  el("orbHz").textContent = trackHz + " Hz";
+  el("odomHz2").textContent = odomHz + " Hz";
   el("kp").textContent = t.keypoints || 0;
   const rev = st.map_revision || {};
-  el("graphRev").textContent = rev.graph_revision ?? 0;
+  el("graphRev").textContent = rev.graph_revision ?? (st.graph && st.graph.revision) ?? 0;
   el("mapRev").textContent = rev.map_revision ?? (st.map && st.map.revision) ?? 0;
+  const loopN = (st.graph && st.graph.loops) ? st.graph.loops.length : 0;
+  el("loopCount").textContent = loopN;
+  el("loopInfo").textContent = loopN + " edges";
   const recovery = el("recovery");
   recovery.hidden = st.state !== "recovery_pending";
-  recovery.textContent = "RECOVERY";
-  recovery.className = "badge status-warn";
+  recovery.textContent = "RECOVERY"; recovery.className = "badge status-warn";
   el("rebuild").textContent = rev.state === "BUILDING" ? "BUILDING" : (rev.state === "FAILED" ? "FAILED" : "");
-
   el("waiting").style.display = st.map && st.map.width > 0 ? "none" : "flex";
-
   maybeReloadMap(st.map, rev.map_revision);
   draw();
   renderEvents(st.events);
@@ -202,8 +256,7 @@ function applyState(st) {
 
 function setDisconnected() {
   const conn = el("conn");
-  conn.textContent = "disconnected";
-  conn.className = "badge badge-disconnected";
+  conn.textContent = "disconnected"; conn.className = "badge badge-disconnected";
 }
 
 // ── poll loop ──────────────────────────────────────────────────────────────────
@@ -217,6 +270,6 @@ async function poll() {
   }
 }
 
-resizeCanvas();
+resizeAll();
 poll();
-setInterval(poll, 100); // 10 Hz
+setInterval(poll, 66); // ~15 Hz for smooth realtime pose windows
