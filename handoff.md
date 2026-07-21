@@ -2,279 +2,259 @@
 
 ## Current State
 
-- Workspace: `/home/duc/robot/src/orb_slam3_ros2`
+- Workspace: `/home/duc/orb_slam3_ros2`
 - Branch: `feature/orb-lidar-thin-walls-p0-p1`
-- Latest commit: `b3bbdd3 docs: record graph observation evaluation`
-- Vendor submodule: `orb_slam3_vendor/vendor/ORB_SLAM3` at `601bec2`
-- The end-to-end circle loop-closure acceptance gate is still failing. Do not
-  report loop closure as fixed.
+- Latest main commit: `2162803 feat: add read-only keyframe drift diagnostic`
+- Vendor submodule `orb_slam3_vendor/vendor/ORB_SLAM3` HEAD (detached, by design):
+  `d8fbdd9 fix: allow distant covisible keyframes as loop candidates via id gap`
+- The multi-lap loop-closure "double wall" problem is **fixed and validated**
+  on the circle bag. See "Loop Revisit Fix" below.
 
-## Objective
+### Uncommitted / untracked (intentional, do not blindly clean)
 
-Make the loop-closure graph evidence emitted by ORB-SLAM3 observable to the
-wrapper and trigger the downstream rebuild. The required acceptance gate is at
-least two `observed_and_rebuilt` outcomes across three rate-one replays of
-`/home/duc/robot/bag/circle-run`.
+- `git status --short` shows `M orb_slam3_vendor/vendor/ORB_SLAM3` — the
+  **submodule pointer bump is NOT yet committed in the main repo**. The fork
+  commits (`848b3de`, `d8fbdd9`) live inside the submodule, but the parent repo
+  still records the old pointer `601bec2`. A fresh clone would not pick up the
+  fix until this pointer is committed (and the fork pushed to its remote
+  `huynhduc9905/ORB_SLAM3`). This is the one remaining finalize step — see
+  "Next Steps".
+- Untracked plan docs from earlier finished work, left as-is:
+  `docs/superpowers/plans/2026-07-20-loop-evidence-map-revisions.md`,
+  `docs/superpowers/plans/2026-07-20-wrapper-log-teardown.md`.
+- Generated `artifacts/` directories are not to be committed.
 
-## Completed Work
+## Loop Revisit Fix (primary recent work)
 
-### Observability Tooling
+### Problem
 
-The wrapper and bringup tooling now capture graph-semantic evidence and
-evaluate it independently of unrelated tracking health:
+On multi-lap bags (the robot re-drives the same physical loop), ORB-SLAM3 fired
+loop closure exactly once near the end of lap 1, then never again. Lap 2's
+accumulated drift was never corrected, so the lidar mapper drew every wall
+twice (~0.3 m apart): the "double wall". Measured lap-1 vs lap-2 ORB pose
+difference at the same physical location: mean 0.29 m, max 0.61 m.
 
-- `67a7d08 feat: enrich loop closure graph evidence`
-- `bfd9aad feat: add loop closure evidence evaluator`
-- `ad8f61d fix: make diagnoses independent and use atomic file writing`
-- `ffb28b4` and `b0a8d73`: reliable wrapper log capture in bag replay.
-- `6609188 feat: add circle loop closure evaluation runner`
+### Confirmed root cause (verified in source)
 
-Key files:
+Loop-candidate selection excluded **any** covisibility-connected keyframe, with
+no temporal component. On lap 2 the robot re-observes lap-1 features, creating
+covisibility edges to the lap-1 keyframes, so they were excluded from ever
+becoming loop candidates. Two gates enforced this:
 
-- `orb_slam3_wrapper/src/wrapper_node.cpp`
-- `orb_slam3_wrapper/src/graph_semantics.cpp`
-- `orb_slam_bringup/orb_slam_bringup/loop_closure_evidence.py`
-- `tools/run_circle_loop_closure_evaluation.sh`
+- `orb_slam3_vendor/vendor/ORB_SLAM3/src/KeyFrameDatabase.cc`
+  `DetectNBestCandidates`: `if(!spConnectedKF.count(pKFi))`
+- `orb_slam3_vendor/vendor/ORB_SLAM3/src/LoopClosing.cc`
+  `DetectCommonRegionsFromBoW`: `bAbortByNearKF` loop
 
-The evaluator diagnoses `core_loop_unobserved` when ORB-SLAM3 reports a loop
-marker but the metrics `loops` array is empty. A qualifying result also needs
-a published rebuild at or after the loop graph revision.
+### Fix
 
-### Vendor Notification Ordering
+A pure, header-only predicate gates both exclusions on a keyframe-ID gap, so
+only *recent* trajectory neighbors are excluded; distant connected keyframes
+(genuine revisits) flow through to the unchanged Sim3 / `>=3` coincidence
+verification.
 
-`dacfb81 fix: notify graph change after loop edge insertion` includes vendor
-commit `601bec2 fix: notify graph change after loop edge insertion`.
+- `orb_slam3_vendor/vendor/ORB_SLAM3/include/LoopRevisitPolicy.h`
+  - `namespace orb_slam3_wrapper_fork`
+  - `constexpr unsigned long kLoopRevisitMinKFGap = 20;`
+  - `bool shouldExcludeConnectedLoopCandidate(current_id, candidate_id)` —
+    returns true (exclude) only when
+    `current_id >= candidate_id && current_id - candidate_id < 20`; false
+    otherwise (guards unsigned underflow for future/equal ids).
+- Both gates call the predicate: exclude iff (connected AND recent).
+- Merge detection, the `>=3` coincidence gate, mapper, metrics, replay runner,
+  and camera/ORB params are all unchanged.
+- The `20` constant is hardcoded (user decision) and tuned to the circle bag's
+  keyframe density; may need adjustment for very different robots/rates.
 
-In `LoopClosing::CorrectLoop()`, the single
-`mpAtlas->InformNewBigChange()` now follows both reciprocal calls:
+Fork commits:
 
-```cpp
-mpLoopMatchedKF->AddLoopEdge(mpCurrentKF);
-mpCurrentKF->AddLoopEdge(mpLoopMatchedKF);
-mpAtlas->InformNewBigChange();
-```
+- `848b3de feat: add keyframe-id-gap loop revisit policy helper`
+- `d8fbdd9 fix: allow distant covisible keyframes as loop candidates via id gap`
 
-It still precedes `mpLocalMapper->Release()`. A focused System-level vendor
-regression was added at:
+Main-repo commits (tests + wiring + diagnostic):
 
-- `orb_slam3_vendor/test/loop_closing_notification_test.cpp`
-- `orb_slam3_vendor/CMakeLists.txt`
+- `bbaaf64 test: cover loop revisit id-gap policy`
+- `2162803 feat: add read-only keyframe drift diagnostic`
 
-The test uses the public `System::MapChanged()` and `System::GetGraphSnapshot()`
-path and is green. Do not revert or duplicate this notification.
+Design + plan:
 
-### Independent Wrapper Graph Observation
+- `docs/superpowers/specs/2026-07-20-loop-revisit-id-gap-design.md`
+- `docs/superpowers/plans/2026-07-20-loop-revisit-id-gap.md`
 
-`ae309ca fix: poll graph changes independently of frames` moved graph-change
-consumption out of `WrapperNode::processStereo()` into a 50 ms wall timer.
+### Validation evidence (circle bag, rate 1, benchmark_mode off)
 
-Key behavior:
+Artifacts: `artifacts/circle-loop-revisit-idgap-20260720/`
 
-- `graph_timer_` calls `pollGraphChanges()`.
-- The timer is the sole consumer of `SlamBackend::mapChanged()`.
-- It returns before backend configuration or before a tracked-frame header
-  exists, so it does not consume an unusable change.
-- It calls `graphSnapshot()` only after `mapChanged()` returns true.
-- It routes a new revision through the existing `publishGraph()` semantic
-  event path using `last_tracked_.header`.
-- It uses the node's default mutually exclusive callback group. No additional
-  threads, locks, or callback groups were added.
+- Graph revision advanced 1 -> **33** (baseline stopped at 3).
+- **25 loop edges**, all `same_map_loop`, firing throughout lap 2.
+- **21 mapper full rebuilds** during lap 2.
+- Corrected trajectory now spans the **full run (bag+0..85s)** vs baseline's
+  bag+42s.
+- ORB lap-1-vs-lap-2 pose difference mean dropped **0.290 -> 0.212 m** (max
+  0.607 -> 0.601; a single worst-point sample, expected — global drift is
+  redistributed as soft constraints).
+- No `MAP_MERGED` / `MAP_RESET` / `cross_map_loop`. Corrected-path "jumps >1 m"
+  were all across 4-19 s sparse-sampling gaps at 0.16-0.36 m/s (below the
+  robot's 0.38 m/s median), i.e. artifacts, not teleports.
 
-The new component regressions spin the node after the final stereo callback
-and prove a later graph snapshot can publish canonical loop edges and a
-`LOOP_CLOSED` event:
+### Reviews
 
-- `orb_slam3_wrapper/test/wrapper_component_test.cpp`
+Implemented via subagent-driven development. Each task independently reviewed
+(all clean). Final whole-branch review: **Ready to merge = Yes**, only Minor
+item was the then-uncommitted drift diagnostic (now committed as `2162803`).
+Progress ledger: `.superpowers/sdd/progress.md`.
 
-The relevant approved design and plan are:
+## Read-Only Keyframe Drift Diagnostic (`2162803`)
 
-- `docs/superpowers/specs/2026-07-19-wrapper-independent-graph-observation-design.md`
-- `docs/superpowers/plans/2026-07-19-wrapper-independent-graph-observation.md`
+Param-gated (`log_keyframe_drift`, default **false**), read-only. When enabled,
+a 500 ms wall timer logs how far ORB-SLAM3 moves keyframe camera poses between
+graph polls, independent of `MapChanged()`. This is a **console/ROS log line
+only** (`RCLCPP_INFO`, `keyframe_drift ...`); it is NOT rendered in the web
+dashboard. Inert when disabled. Files:
 
-## Verification Already Run
+- `orb_slam3_wrapper/include/orb_slam3_wrapper/wrapper_node.hpp`
+- `orb_slam3_wrapper/src/wrapper_node.cpp` (`logKeyframeDrift`, `drift_timer_`)
 
-For `ae309ca`:
+To enable for a run, add `-p log_keyframe_drift:=true` to the wrapper launch
+args (or temporarily to `bag_replay.launch.py`'s `wrapper_cmd_parts`, then
+revert). The launch file is currently clean of this flag.
+
+## Running the Stack
+
+All builds/tests/replays run inside the nix devshell:
 
 ```bash
-colcon build --packages-select orb_slam3_wrapper
-colcon test --packages-select orb_slam3_wrapper \
-  --ctest-args -R 'wrapper_component_test|graph_semantics_test' \
-  --output-on-failure
-pytest orb_slam_bringup/test/test_loop_closure_evidence.py -v
+nix develop --command bash -lc 'export CMAKE_BUILD_PARALLEL_LEVEL=32; <cmd>'
 ```
 
-Results:
+Full stack + LAN dashboard (detach so it survives the shell):
 
-- `wrapper_component_test`: 11 passed.
-- `graph_semantics_test`: 7 passed.
-- `test_loop_closure_evidence.py`: 10 passed.
-- Task reviews and whole-branch review approved with no findings.
-
-## Acceptance Evidence
-
-### Baseline Before Vendor Ordering Fix
-
-- Commit: `6609188`
-- Artifacts: `artifacts/circle-loop-evaluation-20260719_160436`
-- Result: `0/3`
-- All trials logged `*Loop detected`, no `BAD LOOP!!!`, balanced local mapping
-  STOP/RELEASE counts, and `core_loop_unobserved`.
-
-### After Vendor Ordering Fix
-
-- Artifacts: `artifacts/circle-loop-evaluation-20260719_204100`
-- Result: `0/3`
-- Graph revisions `0`, `1`, and `2` were observed, but no loop-edge event was
-  emitted.
-
-### After Independent Wrapper Timer
-
-- Superproject code commit evaluated: `ae309ca`
-- Artifacts: `artifacts/circle-loop-evaluation-20260719_215238`
-- Result: `0/3`, required `2/3`
-- `summary.json` has `passed_runs: 0` and `passed: false`.
-- Every `run-*/loop_closure_evidence.json` says:
-
-```json
-{
-  "diagnoses": ["core_loop_unobserved"],
-  "passed": false
-}
+```bash
+nohup setsid nix develop --command bash -lc 'export CMAKE_BUILD_PARALLEL_LEVEL=32; \
+  exec ros2 launch orb_slam_bringup bag_replay.launch.py \
+  bag_path:=/home/duc/bag/full-run \
+  artifact_dir:=artifacts/<name> rate:=1 ros_domain_id:=<id> \
+  start_dashboard:=true dashboard_host:=0.0.0.0 benchmark_mode:=off' \
+  > artifacts/<name>.launch.log 2>&1 < /dev/null & disown
 ```
 
-- Each run logged `*Loop detected`, no `BAD LOOP!!!`, and balanced Local
-  Mapping STOP/RELEASE markers.
-- No canonical loop edge was extracted/published and no downstream rebuild
-  qualified under the evaluator.
+- Live dashboard: `http://<LAN-IP>:51871/` (bind `0.0.0.0` for LAN). This
+  machine's LAN IP is `192.168.100.112`. The launch log prints
+  `[dashboard] open http://127.0.0.1:51871/` regardless; LAN binding is
+  confirmed via `ss -ltnp | grep 51871` showing `0.0.0.0:51871`.
+- `benchmark_mode:=full_stack` **disables** the dashboard (logs
+  "benchmark modes do not start the dashboard"). Use `benchmark_mode:=off`
+  when you want the dashboard.
+- The dashboard web UI (React/PixiJS) shows: map, trajectories/paths, tracking
+  image, Events panel (loop closures, tracking events), Health panel
+  (`/diagnostics`). It is read-only and in-graph (no Foxglove bridge).
+- The stack shuts down cleanly when the bag finishes.
 
-The acceptance result is committed in:
+### Static per-run report (map versions, odometry, trajectory, etc.)
 
-- `b3bbdd3 docs: record graph observation evaluation`
-- `docs/superpowers/specs/2026-07-19-wrapper-independent-graph-observation-design.md`
+Separate from the live dashboard, each run writes a self-contained
+`report.html` to its artifact dir, generated by
+`orb_slam_bringup/orb_slam_bringup/report.py`. Sections: Run configuration,
+Acceptance gates, Tracking timeline, Trajectory overlay (orb/wheel/corrected),
+Loops, Map rebuilds, Map revisions (before/after previews), Final map,
+Diagnostics, Raw artifacts. Finalized at run shutdown.
 
-## Root-Cause Boundaries
+To view reports over LAN, serve the artifacts dir:
 
-Proven facts:
+```bash
+cd artifacts && nohup setsid python3 -m http.server 8090 --bind 0.0.0.0 \
+  > /tmp/opencode/report_http.log 2>&1 < /dev/null & disown
+# then browse http://192.168.100.112:8090/<run>/report.html
+```
 
-- Loop candidate detection executes consistently on the circle bag.
-- The vendor notification runs after loop-edge insertion in the source and the
-  focused System test verifies that ordering contract.
-- The wrapper timer independently polls changes and unit tests prove it can
-  publish an asynchronously supplied graph snapshot with a loop edge.
-- Real bag runs still yield no observable loop-edge delta, even after the
-  notification and timer changes.
+NOTE: a plain `python3 -m http.server` on `:8090` was left running to serve
+`artifacts/` (no auth, read-only, LAN). Stop it when done
+(`pkill -f 'http.server 8090'`).
 
-Not yet proven:
+## Bags
 
-- Whether `CorrectLoop()` actually completes the reciprocal `AddLoopEdge()`
-  calls in the real circle-run execution before shutdown.
-- Whether the map snapshot contains the reciprocal loop edges when the real
-  notification is observed.
-- Whether a later graph operation overwrites/removes those loop edges before
-  the wrapper captures the snapshot.
-- Whether the expected end-to-end loop signal should be represented by a
-  different vendor graph mutation for this ORB-SLAM3 path.
+Under `/home/duc/bag/` (NOT `/home/duc/robot/bag/`):
 
-Do not apply another speculative fix. Resume with root-cause tracing and add
-diagnostic evidence at the vendor-to-wrapper boundary first.
+- `circle-run` (~90 s) — two laps of the same loop; the double-wall test case.
+- `full-run` (~187 s) — larger trajectory.
+- Others: `20260713_152907`, `forward-and-back-origin`, `inplace-rotate*`.
 
-## Recommended Next Investigation
+Recent replay artifacts:
 
-1. Inspect real graph snapshots at every observed revision, including keyframe
-   IDs and `loop_edge_ids`, rather than only the final wrapper event metrics.
-2. Instrument or test the actual `LoopClosing::CorrectLoop()` concurrent path
-   to establish whether it reaches both `AddLoopEdge()` calls during circle
-   replay, and whether `Map::GetGraphSnapshotData()` contains them afterward.
-3. Correlate `*Loop detected`, `CorrectLoop()` completion, big-change index,
-   timer polling, snapshot revision, and extracted edges with timestamps.
-4. Only after that evidence, decide whether the defect is a vendor lifecycle,
-   snapshot representation, wrapper semantics, or evaluator expectation.
+- `artifacts/circle-loop-revisit-idgap-20260720/` — primary validation run
+  (complete report).
+- `artifacts/full-run-loop-revisit-dashboard-20260721/` — full-run with the fix
+  (12 loop closures, graph revision to 14; report at
+  `.../report.html`).
 
-Use the systematic-debugging and brainstorming workflows before any new
-production change. User explicitly requested subagent implementation and an
-independent review after each task; retry empty/failed subagent work up to
-three times before pausing with the blocker.
+## Prior Completed Work (context)
 
-## Prepared Wrapper-Baseline Retry Plan (Not Implemented)
+Earlier on this branch, before the loop-revisit fix, several wrapper/bringup
+issues were resolved and reviewed clean (see `.superpowers/sdd/progress.md`):
 
-Later source/artifact tracing identified a high-confidence wrapper-side
-hypothesis that supersedes parameter tuning as the next experiment, but it
-still needs the prescribed regression and runtime validation before claiming
-the end-to-end gate is fixed:
+- Graph baseline capture, graph session reset on reconfiguration, and graph
+  observation diagnostics (`2675fd8`..`cec5aee`). These made loop-edge deltas
+  observable to the wrapper — the earlier "circle loop-closure acceptance"
+  failure described in older handoffs is resolved.
+- Loop-closure evidence evaluator reads `metrics["map_revisions"]` and requires
+  a `PUBLISHED` rebuild at/after the loop graph revision
+  (`2bc0399`, `c8043f7`); `orb_slam_bringup/orb_slam_bringup/loop_closure_evidence.py`,
+  runner `tools/run_circle_loop_closure_evaluation.sh`.
+- Wrapper logging teardown: bag replay now uses
+  `exec ros2 run ... > >(tee -a <log>) 2>&1` so shutdown signals reach the
+  wrapper and no `ros2 run`/`tee`/wrapper processes leak (`a073d2d`, `1706a71`).
 
-- `System::MapChanged()` stays false while the atlas big-change index is zero
-  (`orb_slam3_vendor/vendor/ORB_SLAM3/src/System.cc`). The wrapper therefore
-  does not capture a pre-loop graph baseline.
-- `CorrectLoop()` adds reciprocal loop edges and then signals the big change
-  (`orb_slam3_vendor/vendor/ORB_SLAM3/src/LoopClosing.cc`).
-- On the first changed snapshot, `previous_graph_` is empty. The semantic
-  classifier only finds loop-edge deltas when a previous snapshot exists
-  (`orb_slam3_wrapper/src/graph_semantics.cpp`). This plausibly drops the
-  first observable loop edge permanently even though revisions 1 and 2 drive
-  downstream map rebuilds.
-- Circle-run visual tracking is not currently the bottleneck: all latest runs
-  logged `*Loop detected`; run-1 metrics report initialized tracking, no
-  losses, and `ok_ratio_after_init: 1.0`. Do not tune ORB parameters or alter
-  vendor ORB-SLAM3 for this acceptance failure first. The roughly 41% stereo
-  pairing ratio is a separate future robustness investigation.
+## Next Steps
 
-The complete TDD plan is at the currently untracked file:
-
-- `docs/superpowers/plans/2026-07-19-wrapper-graph-baseline.md`
-
-Its sole task is deliberately limited to:
-
-1. Add `FirstChangedGraphWithLoopEdgeEmitsLoopClosed` in
-   `orb_slam3_wrapper/test/wrapper_component_test.cpp`. The fake backend must
-   first be spun with `changed=false`, proving a baseline is not published;
-   then revision 1 introduces reciprocal loop edges and must emit exactly one
-   `LOOP_CLOSED` event.
-2. Run the focused component test before production code and observe the RED
-   failure.
-3. Add `graph_baseline_captured_{false}` in
-   `orb_slam3_wrapper/include/orb_slam3_wrapper/wrapper_node.hpp`. In
-   `WrapperNode::pollGraphChanges()`, after existing readiness checks but
-   before the timer's sole `mapChanged()` call, capture exactly one
-   `previous_graph_ = backend_->graphSnapshot()` baseline. It must not call
-   `publishGraph()`, publish events, or update `last_graph_revision_`.
-4. Run `colcon build --packages-select orb_slam3_wrapper`, then the focused
-   `wrapper_component_test`, then the
-   `wrapper_component_test|graph_semantics_test` CTest regex. Run
-   `git diff --check` before committing only the three wrapper files.
-5. After task review, run a rate-one circle replay with boundary diagnostics
-   (snapshot revision, raw canonical loop-edge count, previous-baseline
-   presence, and extracted delta count) before claiming the 2/3 acceptance
-   gate passes.
-
-### Subagent Execution Blocker
-
-No implementation was attempted by the main agent. Multiple worker/planner
-subagent dispatches were made for the exact plan above. The first misrouted to
-an unrelated home-directory task; all later retries returned empty and made no
-repository edits, builds, tests, or commits. The task report at
-`.superpowers/sdd/task-1-report.md` contains only a heading. Before retrying,
-verify the subagent harness can actually execute shell/file-edit work. Once it
-can, use a fresh implementer, independently review the task diff, and retain
-all untracked scratch files.
+1. **Commit the submodule pointer bump** in the main repo so the fork fix is
+   actually referenced by the parent, ideally after pushing the fork:
+   ```bash
+   git -C orb_slam3_vendor/vendor/ORB_SLAM3 push origin HEAD   # push 848b3de/d8fbdd9 to the fork remote
+   git add orb_slam3_vendor/vendor/ORB_SLAM3
+   git commit -m "chore: bump ORB_SLAM3 submodule to loop-revisit id-gap fix"
+   ```
+   (Not done automatically — it publishes the fork pointer and depends on the
+   fork remote having the commits.)
+2. Optionally validate the fix on `full-run` via the evaluator / report and on
+   any other multi-lap bags.
+3. If deploying to robots with very different keyframe density, revisit
+   `kLoopRevisitMinKFGap` (currently hardcoded 20).
 
 ## Important Files
 
+- `orb_slam3_vendor/vendor/ORB_SLAM3/include/LoopRevisitPolicy.h`
+- `orb_slam3_vendor/vendor/ORB_SLAM3/src/KeyFrameDatabase.cc`
 - `orb_slam3_vendor/vendor/ORB_SLAM3/src/LoopClosing.cc`
-- `orb_slam3_vendor/vendor/ORB_SLAM3/src/System.cc`
-- `orb_slam3_vendor/vendor/ORB_SLAM3/src/Map.cc`
-- `orb_slam3_vendor/test/loop_closing_notification_test.cpp`
-- `orb_slam3_wrapper/src/wrapper_node.cpp`
+- `orb_slam3_vendor/test/loop_revisit_policy_test.cpp`
+- `orb_slam3_wrapper/src/wrapper_node.cpp` (`logKeyframeDrift`, `pollGraphChanges`)
 - `orb_slam3_wrapper/src/graph_semantics.cpp`
-- `orb_slam3_wrapper/test/wrapper_component_test.cpp`
+- `orb_slam_bringup/launch/bag_replay.launch.py`
+- `orb_slam_bringup/orb_slam_bringup/report.py`
 - `orb_slam_bringup/orb_slam_bringup/loop_closure_evidence.py`
 - `tools/run_circle_loop_closure_evaluation.sh`
-- `.git/sdd/progress.md`
+- `docs/superpowers/specs/2026-07-20-loop-revisit-id-gap-design.md`
+- `docs/superpowers/plans/2026-07-20-loop-revisit-id-gap.md`
+- `.superpowers/sdd/progress.md`
+
+## Build / Vendor Notes
+
+- The vendor package builds ORB_SLAM3 by `git clone`-ing the submodule's
+  **committed** state at CMake configure time, then applying
+  `orb_slam3_vendor/patches/*.patch`. Consequences:
+  - Edits to the submodule source only take effect after committing **inside
+    the submodule**.
+  - A clean vendor rebuild requires
+    `rm -rf build/orb_slam3_vendor install/orb_slam3_vendor` first; otherwise
+    CMake reuses the cached clone. A sub-second vendor "build" means nothing
+    recompiled — an ORB_SLAM3 recompile takes minutes.
+  - Verify a source change reached the build via
+    `grep -n <token> build/orb_slam3_vendor/ORB_SLAM3/src/<file>`.
+- The submodule is intentionally on a detached HEAD; commit there without
+  creating/switching branches unless asked.
 
 ## Workspace Hygiene
 
-The current branch has unrelated untracked scratch files. Do not delete,
-modify, stage, or commit them. `git status --short` presently includes files
-such as `new_test.pyncat`, `result_table.md`, `tf_audit.json`,
-`tracking_benchmark.json`, and multiple `tools/check_select*` and
-`tools/eval_rates*` scripts. Generated `artifacts/` directories are also not
-to be committed.
+Do not delete/modify/stage unrelated untracked scratch files or generated
+`artifacts/` directories. The intended uncommitted items are the submodule
+pointer (pending step 1 above) and the two untracked plan docs listed under
+"Current State".
