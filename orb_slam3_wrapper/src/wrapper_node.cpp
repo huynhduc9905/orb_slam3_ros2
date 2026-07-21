@@ -145,6 +145,13 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
     pollGraphChanges();
   });
 
+  log_keyframe_drift_ = declare_parameter("log_keyframe_drift", false);
+  if (log_keyframe_drift_) {
+    drift_timer_ = create_wall_timer(std::chrono::milliseconds(500), [this] {
+      if (backend_ && backend_configured_) logKeyframeDrift(backend_->graphSnapshot());
+    });
+  }
+
   if (!backend_ && !settings.empty() && !vocabulary.empty()) {
     backend_ = std::make_unique<OrbSlam3Backend>(vocabulary, settings);
   }
@@ -228,6 +235,49 @@ void WrapperNode::pollGraphChanges() {
   if (!backend_->mapChanged()) return;
   const auto graph = backend_->graphSnapshot();
   if (graph.revision != last_graph_revision_) publishGraph(graph, last_tracked_.header);
+}
+
+void WrapperNode::logKeyframeDrift(const ORB_SLAM3::GraphSnapshot& graph) {
+  // Read-only: compare each keyframe's current camera translation against the
+  // value observed on the previous poll. This runs regardless of MapChanged()
+  // so it captures ongoing local-BA refinement that never bumps the published
+  // revision. Reports how much of the graph is still moving and where.
+  std::size_t moved = 0;
+  double max_delta = 0.0;
+  std::uint64_t max_id = 0;
+  double sum_delta = 0.0;
+  std::uint64_t newest_id = 0;
+  double newest_delta = 0.0;
+  std::unordered_map<std::uint64_t, std::array<double, 3>> current;
+  current.reserve(graph.keyframes.size());
+  for (const auto& kf : graph.keyframes) {
+    if (kf.bad) continue;
+    const auto t = kf.T_world_camera.translation();
+    const std::array<double, 3> pos{static_cast<double>(t.x()),
+                                    static_cast<double>(t.y()),
+                                    static_cast<double>(t.z())};
+    current[kf.id] = pos;
+    const auto found = drift_last_pose_.find(kf.id);
+    if (found != drift_last_pose_.end()) {
+      const double dx = pos[0] - found->second[0];
+      const double dy = pos[1] - found->second[1];
+      const double dz = pos[2] - found->second[2];
+      const double delta = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (delta > 1e-4) ++moved;
+      sum_delta += delta;
+      if (delta > max_delta) { max_delta = delta; max_id = kf.id; }
+      if (kf.id >= newest_id) { newest_id = kf.id; newest_delta = delta; }
+    }
+  }
+  const std::size_t total = current.size();
+  const double mean_delta = total > 0 ? sum_delta / static_cast<double>(total) : 0.0;
+  RCLCPP_INFO(get_logger(),
+              "keyframe_drift revision=%lu keyframes=%zu moved=%zu mean_m=%.4f "
+              "max_m=%.4f max_kf=%lu newest_kf=%lu newest_kf_delta_m=%.4f",
+              static_cast<unsigned long>(graph.revision), total, moved, mean_delta,
+              max_delta, static_cast<unsigned long>(max_id),
+              static_cast<unsigned long>(newest_id), newest_delta);
+  drift_last_pose_ = std::move(current);
 }
 
 void WrapperNode::processStereo(const Image& left, const Image& right) {

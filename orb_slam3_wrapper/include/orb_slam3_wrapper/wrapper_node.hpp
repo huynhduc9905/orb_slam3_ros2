@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <cv_bridge/cv_bridge.hpp>
@@ -59,6 +61,7 @@ private:
   void infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left);
   void processStereo(const Image& left, const Image& right);
   void pollGraphChanges();
+  void logKeyframeDrift(const ORB_SLAM3::GraphSnapshot& graph);
   cv::Mat mono8(const Image& image) const;
   void publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_msgs::msg::Header& header);
   void publishDiagnostics(const std::string& level, const std::string& message);
@@ -108,6 +111,14 @@ private:
   bool graph_baseline_captured_{false};
   std::optional<ORB_SLAM3::GraphSnapshot> previous_graph_;
   std::unique_ptr<LatestImageWorker> image_worker_;
+
+  // Read-only diagnostic (param-gated): measures how much ORB-SLAM3 moves
+  // keyframe camera poses between successive graph polls, independent of the
+  // published revision / MapChanged() gate. Used to determine whether the tail
+  // of the trajectory keeps being optimized after the last loop closure.
+  bool log_keyframe_drift_{false};
+  rclcpp::TimerBase::SharedPtr drift_timer_;
+  std::unordered_map<std::uint64_t, std::array<double, 3>> drift_last_pose_;
 };
 
 }  // namespace orb_slam3_wrapper
