@@ -115,6 +115,12 @@ private:
   // poses. When false, scans are also inserted incrementally at commit time
   // (lower latency to first map, but accumulates drift between corrections).
   bool rebuild_only_map_;
+  // Wall-clock throttle for full rebuilds inside MapRebuilder. Rebuild work is
+  // O(committed_scans * rays_per_scan) and grows unboundedly during a session;
+  // without a throttle the rebuild worker saturates a core once the map is
+  // large. This defers the next full rebuild until at least this many seconds
+  // after the previous one completed. Zero disables the throttle.
+  double map_rebuild_min_interval_s_;
 
   // ── Core objects (all accessed only from subscription callbacks / mutex) ──
   std::mutex mutex_;

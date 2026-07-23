@@ -218,7 +218,8 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   publish_wheel_path_(declare_parameter("publish_wheel_path", false)),
   wheel_path_max_points_(declare_parameter("wheel_path_max_points", 1500)),
   map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)),
-  rebuild_only_map_(declare_parameter("rebuild_only_map", true)) {
+  rebuild_only_map_(declare_parameter("rebuild_only_map", true)),
+  map_rebuild_min_interval_s_(declare_parameter("map_rebuild_min_interval_s", 5.0)) {
 
   if (!std::isfinite(hit_range_max_m_) || !std::isfinite(hit_log_odds_) ||
       !std::isfinite(miss_log_odds_) || hit_range_max_m_ <= 0.0 ||
@@ -239,6 +240,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   }
   if (!std::isfinite(map_publish_min_interval_s_) || map_publish_min_interval_s_ < 0.0) {
     throw std::invalid_argument("map_publish_min_interval_s must be finite and non-negative");
+  }
+  if (!std::isfinite(map_rebuild_min_interval_s_) || map_rebuild_min_interval_s_ < 0.0) {
+    throw std::invalid_argument("map_rebuild_min_interval_s must be finite and non-negative");
   }
   if (wheel_path_max_points_ <= 0) {
     throw std::invalid_argument("wheel_path_max_points must be positive");
@@ -269,7 +273,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       grid_cfg,
       [this](std::shared_ptr<const MapSnapshot> snap, const RebuildStatus& status) {
         publishMapAndRevision(std::move(snap), status);
-      });
+      },
+      MapRebuilderTestHooks{},
+      map_rebuild_min_interval_s_);
 
   // QoS
   auto sensor_qos = rclcpp::SensorDataQoS();

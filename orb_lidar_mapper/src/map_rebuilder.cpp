@@ -105,8 +105,14 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
     std::string detail;
   };
 
-  Impl(GridConfig config_in, PublishCallback callback_in, MapRebuilderTestHooks hooks_in)
+  Impl(GridConfig config_in, PublishCallback callback_in, MapRebuilderTestHooks hooks_in,
+       double min_full_rebuild_interval_s)
       : config(std::move(config_in)), callback(std::move(callback_in)), hooks(std::move(hooks_in)),
+        min_full_rebuild_interval(
+            min_full_rebuild_interval_s > 0.0
+                ? std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      std::chrono::duration<double>(min_full_rebuild_interval_s))
+                : std::chrono::steady_clock::duration::zero()),
         grid(std::make_unique<TiledOccupancyGrid>(config)) {}
 
   ~Impl() { shutdown(); }
@@ -236,6 +242,7 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         snapshot->committed_scan_count = committed_scan_count;
         current_snapshot = snapshot;
         latest_successful_full_revision = request.trajectory->graph_revision;
+        last_full_rebuild_completed = std::chrono::steady_clock::now();
         active_full.reset();
         published = {RebuildState::kPublished, snapshot->graph_revision, snapshot->map_revision,
                      request.archive->scans.size(), snapshot->committed_scan_count, elapsed, {},
@@ -394,18 +401,38 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [this] { return stop || full_request || !incrementals.empty() || !failures.empty(); });
         if (stop) break;
-        if (full_request) {
+        // Full-rebuild throttle: if a rebuild finished less than
+        // min_full_rebuild_interval ago, DEFER picking up full_request but
+        // still service incrementals/failures below. This bounds the rebuild
+        // worker's duty cycle on long runs without stalling the whole pipeline.
+        // If nothing else is queued, wait until the deadline (or stop or new
+        // work) and loop back to top. requestRebuild replaces full_request
+        // in place, so when we finally pick it up we always run the newest.
+        const bool throttle_active = full_request && last_full_rebuild_completed &&
+            min_full_rebuild_interval != std::chrono::steady_clock::duration::zero() &&
+            std::chrono::steady_clock::now() <
+                *last_full_rebuild_completed + min_full_rebuild_interval;
+        if (full_request && !throttle_active) {
           active_full = *full_request;
           full = active_full;
           full_request.reset();
         } else if (!failures.empty()) {
           failure = std::move(failures.front());
           failures.pop_front();
-        } else {
+        } else if (!incrementals.empty()) {
           while (!incrementals.empty() && items.size() < kMaxIncrementalsPerPublication) {
             items.push_back(std::move(incrementals.front()));
             incrementals.pop_front();
           }
+        } else if (throttle_active) {
+          // Only a throttled full_request remains — sleep until the deadline
+          // or until higher-priority work / stop arrives, then re-check.
+          const auto deadline = *last_full_rebuild_completed + min_full_rebuild_interval;
+          cv.wait_until(lock, deadline, [this] {
+            return stop || !incrementals.empty() || !failures.empty();
+          });
+          if (stop) break;
+          continue;
         }
       }
       if (full) {
@@ -451,13 +478,24 @@ struct MapRebuilder::Impl : std::enable_shared_from_this<MapRebuilder::Impl> {
   std::uint64_t request_generation{};
   std::uint64_t committed_graph_revision{};
   std::optional<std::uint64_t> latest_successful_full_revision;
+  // Wall-clock throttle for full rebuilds: after a full rebuild completes,
+  // no new full rebuild starts before this interval has elapsed. Bounds the
+  // rebuild worker's duty cycle so it cannot saturate a core when loop
+  // closures burst on long runs. Failures and incrementals still flow
+  // through during the throttle window. Zero disables the throttle.
+  std::chrono::steady_clock::duration min_full_rebuild_interval{
+      std::chrono::steady_clock::duration::zero()};
+  std::optional<std::chrono::steady_clock::time_point> last_full_rebuild_completed;
   std::uint64_t map_revision{};
   std::uint64_t committed_scan_count{};
   bool stop{};
 };
 
-MapRebuilder::MapRebuilder(GridConfig config, PublishCallback callback, MapRebuilderTestHooks hooks) {
-  auto state = std::make_shared<Impl>(std::move(config), std::move(callback), std::move(hooks));
+MapRebuilder::MapRebuilder(GridConfig config, PublishCallback callback,
+                           MapRebuilderTestHooks hooks,
+                           double min_full_rebuild_interval_s) {
+  auto state = std::make_shared<Impl>(std::move(config), std::move(callback), std::move(hooks),
+                                      min_full_rebuild_interval_s);
   state->start(state);
   impl_ = std::move(state);
 }

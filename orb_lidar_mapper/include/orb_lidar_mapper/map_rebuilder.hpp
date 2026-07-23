@@ -72,7 +72,8 @@ class MapRebuilder {
   using PublishCallback = std::function<void(std::shared_ptr<const MapSnapshot>, const RebuildStatus&)>;
 
   MapRebuilder(GridConfig config, PublishCallback callback,
-               MapRebuilderTestHooks hooks = {});
+               MapRebuilderTestHooks hooks = {},
+               double min_full_rebuild_interval_s = 0.0);
   ~MapRebuilder();
   MapRebuilder(const MapRebuilder&) = delete;
   MapRebuilder& operator=(const MapRebuilder&) = delete;

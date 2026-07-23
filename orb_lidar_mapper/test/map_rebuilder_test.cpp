@@ -1,10 +1,13 @@
 #include <chrono>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -849,6 +852,89 @@ TEST(MapRebuilder, ConstructorStressAndStatusFieldsAreConsistent) {
       }
     }
   }
+}
+
+TEST(MapRebuilder, FullRebuildThrottleBoundsWorkerFrequencyAndPreservesLatest) {
+  // With a 100 ms throttle, a burst of full rebuild requests over ~300 ms must
+  // collapse into at most ~4 published rebuilds (300/100 + 1 initial), and the
+  // last published rebuild must correspond to the newest requested revision.
+  Recorder recorder;
+  GridConfig config; config.resolution_m = 1.0;
+  config.hit_log_odds = 0.85F;
+  config.hit_range_max_m = 100.0;
+  config.usable_range_m = 100.0;
+  constexpr double kIntervalS = 0.1;
+  MapRebuilder rebuilder(
+      config,
+      [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); },
+      MapRebuilderTestHooks{},
+      kIntervalS);
+
+  const auto start = std::chrono::steady_clock::now();
+  // First request: no prior rebuild, so it runs immediately.
+  rebuilder.requestRebuild(trajectory(1, {pose(1, 4.0)}), archive({scan(1)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+
+  // Burst 20 rebuilds over ~300 ms; the throttle must collapse them.
+  constexpr int kBurst = 20;
+  constexpr auto kSleep = std::chrono::milliseconds(15);
+  for (int i = 2; i <= kBurst + 1; ++i) {
+    rebuilder.requestRebuild(
+        trajectory(static_cast<std::uint64_t>(i), {pose(static_cast<std::uint64_t>(i), 4.0 + i * 0.01)}),
+        archive({scan(static_cast<std::uint64_t>(i))}));
+    std::this_thread::sleep_for(kSleep);
+  }
+  // Give the throttle time to release the last queued request.
+  ASSERT_TRUE(recorder.waitForPublishedRevision(kBurst + 1));
+  const auto elapsed_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+  // Count PUBLISHED full-rebuild statuses.
+  std::size_t published_count{};
+  std::uint64_t max_published_revision{};
+  {
+    std::lock_guard<std::mutex> lock(recorder.mutex);
+    for (const RebuildStatus& status : recorder.statuses) {
+      if (status.state == RebuildState::kPublished && status.full_rebuild) {
+        ++published_count;
+        max_published_revision = std::max(max_published_revision, status.graph_revision);
+      }
+    }
+  }
+  // Upper bound: 1 (immediate first) + ceil(elapsed/interval) subsequent.
+  const std::size_t upper = 1U +
+      static_cast<std::size_t>(std::ceil(elapsed_s / kIntervalS)) + 1U;  // +1 slack
+  EXPECT_LE(published_count, upper)
+      << "throttle failed to bound rebuild frequency: "
+      << published_count << " rebuilds in " << elapsed_s << " s";
+  EXPECT_GE(published_count, 2U) << "at least the first and last rebuilds must publish";
+  // Latest-wins: after the burst settles, the newest requested revision is
+  // published (so the throttle does not lose the final trajectory).
+  EXPECT_EQ(max_published_revision, static_cast<std::uint64_t>(kBurst + 1));
+}
+
+TEST(MapRebuilder, FullRebuildThrottleZeroPreservesUnthrottledBehavior) {
+  // With the throttle disabled (0 s), every request runs and publishes.
+  Recorder recorder;
+  GridConfig config; config.resolution_m = 1.0;
+  config.hit_log_odds = 0.85F;
+  config.hit_range_max_m = 100.0;
+  config.usable_range_m = 100.0;
+  MapRebuilder rebuilder(
+      config,
+      [&](auto snapshot, const RebuildStatus& status) { recorder.record(snapshot, status); },
+      MapRebuilderTestHooks{},
+      0.0);
+  rebuilder.requestRebuild(trajectory(1, {pose(1, 4.0)}), archive({scan(1)}));
+  ASSERT_TRUE(recorder.waitForPublishedRevision(1));
+  // A follow-up request submitted after the first completes must publish
+  // without any wait; there is no interval to honour.
+  rebuilder.requestRebuild(trajectory(2, {pose(2, 5.0)}), archive({scan(2)}));
+  const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(recorder.waitForPublishedRevision(2));
+  const auto elapsed_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  EXPECT_LT(elapsed_ms, 500.0) << "unthrottled rebuild must not wait";
 }
 
 }  // namespace

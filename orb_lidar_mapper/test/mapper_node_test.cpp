@@ -274,7 +274,10 @@ protected:
     // Tests that rely on incremental map publication need rebuild_only_map=false;
     // production default is true (rebuild-only for map accuracy).
     rclcpp::NodeOptions default_opts;
-    default_opts.parameter_overrides({rclcpp::Parameter("rebuild_only_map", false)});
+    default_opts.parameter_overrides({
+        rclcpp::Parameter("rebuild_only_map", false),
+        rclcpp::Parameter("map_rebuild_min_interval_s", 0.0),
+    });
     mapper_ = std::make_shared<MapperNode>(default_opts);
 
     // Let subscriptions discover each other before publishing.
@@ -380,16 +383,19 @@ protected:
   void recreateMapper(const rclcpp::NodeOptions& options) {
     // Inject rebuild_only_map=false unless the caller explicitly overrides it,
     // so existing incremental-publication tests keep working without changes.
+    // Also inject map_rebuild_min_interval_s=0.0 so back-to-back rebuild
+    // requests in tests aren't delayed by the production throttle default.
     rclcpp::NodeOptions merged = options;
     bool has_rebuild_only = false;
+    bool has_rebuild_interval = false;
     for (const auto& p : merged.parameter_overrides()) {
-      if (p.get_name() == "rebuild_only_map") { has_rebuild_only = true; break; }
+      if (p.get_name() == "rebuild_only_map") { has_rebuild_only = true; }
+      else if (p.get_name() == "map_rebuild_min_interval_s") { has_rebuild_interval = true; }
     }
-    if (!has_rebuild_only) {
-      auto overrides = merged.parameter_overrides();
-      overrides.emplace_back("rebuild_only_map", false);
-      merged.parameter_overrides(overrides);
-    }
+    auto overrides = merged.parameter_overrides();
+    if (!has_rebuild_only) overrides.emplace_back("rebuild_only_map", false);
+    if (!has_rebuild_interval) overrides.emplace_back("map_rebuild_min_interval_s", 0.0);
+    merged.parameter_overrides(overrides);
     mapper_.reset();
     mapper_ = std::make_shared<MapperNode>(merged);
     spinFlush(mapper_, helper_, 200ms);
@@ -1166,6 +1172,7 @@ TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   EXPECT_NEAR(prod_mapper->get_parameter("pending_scan_timeout_s").as_double(), 2.0, 1e-9);
   EXPECT_EQ(prod_mapper->get_parameter("pending_scan_limit").as_int(), 200);
   EXPECT_TRUE(prod_mapper->get_parameter("rebuild_only_map").as_bool());
+  EXPECT_NEAR(prod_mapper->get_parameter("map_rebuild_min_interval_s").as_double(), 5.0, 1e-9);
 }
 
 TEST_F(MapperNodeTest, ScanGateParametersRejectInvalidBoundaries) {
