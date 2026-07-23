@@ -166,16 +166,24 @@ class DashboardServer(Node):
         # mapper/wrapper reliable writers (an external reliable reader was measured
         # to degrade tracking). Events stay reliable — they are low-rate and drive
         # loss/recovery state that must not be silently dropped.
+        # Map grid + revision: BEST_EFFORT with generous depth. RELIABLE +
+        # TRANSIENT_LOCAL was attempted but the large ~200 KB OccupancyGrid was
+        # silently undelivered by FastDDS when the Python process couldn't
+        # service the reliable handshake fast enough during high-rate callback
+        # bursts. BEST_EFFORT depth=5 catches rebuild publications reliably in
+        # practice since the mapper publishes on every graph snapshot (~1 Hz).
         best_effort1 = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST)
         best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                    history=HistoryPolicy.KEEP_LAST)
         reliable100 = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
                                  history=HistoryPolicy.KEEP_LAST)
+        map_sub_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                 history=HistoryPolicy.KEEP_LAST)
         self.create_subscription(OccupancyGrid, gp("map_topic").value, self._on_map,
-                                 best_effort1, callback_group=self._map_cbg)
+                                 map_sub_qos, callback_group=self._state_cbg)
         self.create_subscription(MapRevision, gp("map_revision_topic").value, self._on_map_revision,
-                                 best_effort10, callback_group=self._map_cbg)
+                                 map_sub_qos, callback_group=self._state_cbg)
         self.create_subscription(RevisionedPath, gp("corrected_path_topic").value, self._on_corrected_path,
                                  best_effort1, callback_group=self._state_cbg)
         self.create_subscription(Marker, gp("provisional_scan_topic").value, self._on_provisional_scan,
@@ -343,12 +351,8 @@ class DashboardServer(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = DashboardServer()
-    # SingleThreadedExecutor: a MultiThreadedExecutor (even capped) busy-loops
-    # rebuilding its wait set in Python whenever a thread wakes on a message
-    # whose MutuallyExclusive callback group is already running on another
-    # thread, pegging a core. One thread drains callbacks sequentially and
-    # blocks in rcl_wait when idle. The 1 Hz, few-ms map render briefly sharing
-    # this thread with pose/state updates is imperceptible at the 15 Hz poll.
+    # SingleThreadedExecutor avoids the busy-wait CPU overhead of
+    # MultiThreadedExecutor with MutuallyExclusive callback groups.
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     try: executor.spin()

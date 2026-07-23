@@ -217,7 +217,8 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   pending_scan_limit_(declare_parameter("pending_scan_limit", 200)),
   publish_wheel_path_(declare_parameter("publish_wheel_path", false)),
   wheel_path_max_points_(declare_parameter("wheel_path_max_points", 1500)),
-  map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)) {
+  map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)),
+  rebuild_only_map_(declare_parameter("rebuild_only_map", true)) {
 
   if (!std::isfinite(hit_range_max_m_) || !std::isfinite(hit_log_odds_) ||
       !std::isfinite(miss_log_odds_) || hit_range_max_m_ <= 0.0 ||
@@ -492,14 +493,19 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     return;
   }
 
-  // Feed newly-committed scans incrementally as well.
-  for (const auto& sp : filtered_traj->scans) {
-    if (sp.committed && committed_scan_ids_.find(sp.scan_id) == committed_scan_ids_.end()) {
-      for (const auto& arc : filtered_arc->scans) {
-        if (arc.scan_id == sp.scan_id) {
-          rebuilder_->appendCommitted(arc, sp, snap.graph_revision);
-          committed_scan_ids_.insert(sp.scan_id);
-          break;
+  // Feed newly-committed scans incrementally as well. In rebuild-only mode the
+  // full rebuild re-raytraces every committed scan from corrected poses anyway,
+  // so we skip the incremental path (avoids a brief flash of partially-placed
+  // scans before the rebuild overwrites the grid).
+  if (!rebuild_only_map_) {
+    for (const auto& sp : filtered_traj->scans) {
+      if (sp.committed && committed_scan_ids_.find(sp.scan_id) == committed_scan_ids_.end()) {
+        for (const auto& arc : filtered_arc->scans) {
+          if (arc.scan_id == sp.scan_id) {
+            rebuilder_->appendCommitted(arc, sp, snap.graph_revision);
+            committed_scan_ids_.insert(sp.scan_id);
+            break;
+          }
         }
       }
     }
@@ -725,7 +731,14 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
 
   if (placement->committed) {
     if (committed_scan_ids_.find(placement->scan_id) == committed_scan_ids_.end()) {
-      rebuilder_->appendCommitted(archived, *placement, last_graph_revision_);
+      // In rebuild-only mode, skip incremental grid insertion: scans placed at
+      // the current (potentially drifted) pose would produce ghost/doubled
+      // walls. The grid is only updated via full rebuilds (triggered by every
+      // graph snapshot), which re-raytrace all committed scans at their latest
+      // corrected poses from scratch.
+      if (!rebuild_only_map_) {
+        rebuilder_->appendCommitted(archived, *placement, last_graph_revision_);
+      }
       committed_scan_ids_.insert(placement->scan_id);
     }
     ++scans_committed_;

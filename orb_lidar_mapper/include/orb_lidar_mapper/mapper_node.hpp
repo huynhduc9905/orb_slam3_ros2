@@ -108,6 +108,13 @@ private:
   // (the internal TiledOccupancyGrid still updates every commit); full rebuilds
   // (loop closure) and failures always bypass the throttle.
   double map_publish_min_interval_s_;
+  // When true (default), the occupancy grid is only updated via full rebuilds
+  // (triggered by graph snapshots / loop closures), which re-raytrace all
+  // committed scans from their corrected poses on a fresh grid. This prevents
+  // ghost/doubled walls from incremental scans placed at drifted pre-correction
+  // poses. When false, scans are also inserted incrementally at commit time
+  // (lower latency to first map, but accumulates drift between corrections).
+  bool rebuild_only_map_;
 
   // ── Core objects (all accessed only from subscription callbacks / mutex) ──
   std::mutex mutex_;
