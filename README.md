@@ -1,6 +1,6 @@
 # orb_slam3_ros2
 
-Headless official ORB-SLAM3 integration, corrected 2D lidar mapping, and a
+Headless custom ORB-SLAM3 integration, corrected 2D lidar mapping, and a
 read-only ROS 2 dashboard.
 
 The initial robot profile targets tasteRobot2. Core packages remain topic- and
