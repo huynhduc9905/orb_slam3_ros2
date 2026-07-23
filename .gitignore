@@ -2,6 +2,7 @@ build/
 install/
 log/
 .worktrees/
+.superpowers/
 node_modules/
 dist/
 artifacts/

@@ -48,6 +48,10 @@ struct RebuildStatus {
   std::uint64_t committed_scan_count{};
   double duration_ms{};
   std::string detail;
+  // True only for full-rebuild publications (e.g. loop closure), which must
+  // bypass any viewer-side publish throttling so the corrected map is never
+  // dropped. Incremental publications leave this false.
+  bool full_rebuild{};
 };
 
 // A narrow deterministic seam for tests that need to block or throw between scans.

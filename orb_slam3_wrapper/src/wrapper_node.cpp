@@ -126,6 +126,18 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
     if (rclcpp::ok()) publishDiagnostics("ERROR", std::string("tracking image worker: ") + error);
   });
 
+  // Decouple blocking reliable publishes from the tracking/graph spin thread.
+  graph_publish_worker_ = std::make_unique<SerialPublishWorker>(
+      /*coalesce=*/true, /*max_queue=*/1, [this](const std::string& error) {
+        if (rclcpp::ok())
+          RCLCPP_ERROR(get_logger(), "graph publish worker: %s", error.c_str());
+      });
+  event_publish_worker_ = std::make_unique<SerialPublishWorker>(
+      /*coalesce=*/false, /*max_queue=*/1024, [this](const std::string& error) {
+        if (rclcpp::ok())
+          RCLCPP_ERROR(get_logger(), "event publish worker: %s", error.c_str());
+      });
+
   left_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(left_info_topic_, sensor_qos,
       [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr msg) { infoCallback(msg, true); });
   right_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(right_info_topic_, sensor_qos,
@@ -157,7 +169,11 @@ WrapperNode::WrapperNode(std::unique_ptr<SlamBackend> backend)
   }
 }
 
-WrapperNode::~WrapperNode() { if (image_worker_) image_worker_->stop(); }
+WrapperNode::~WrapperNode() {
+  if (image_worker_) image_worker_->stop();
+  if (graph_publish_worker_) graph_publish_worker_->stop();
+  if (event_publish_worker_) event_publish_worker_->stop();
+}
 
 void WrapperNode::infoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg, bool left) {
   auto& cached = left ? left_info_ : right_info_;
@@ -357,11 +373,11 @@ void WrapperNode::processStereo(const Image& left, const Image& right) {
       ? orb_slam3_msgs::msg::TrackingEvent::RELOCALIZED
       : orb_slam3_msgs::msg::TrackingEvent::LOST;
     event.detail = "tracking state transition; loop closure not asserted";
-    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+    event_publish_worker_->submit([this, event]{ events_pub_->publish(event); }); last_event_ = event; ++event_publish_count_;
   } else if (last_tracking_state_ == -1 && frame.tracking_state == orb_slam3_msgs::msg::TrackedFrame::OK) {
     orb_slam3_msgs::msg::TrackingEvent event; event.header = output.header;
     event.type = orb_slam3_msgs::msg::TrackingEvent::INITIALIZED; event.map_id = frame.map_id;
-    event.detail = "first valid ORB pose"; events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+    event.detail = "first valid ORB pose"; event_publish_worker_->submit([this, event]{ events_pub_->publish(event); }); last_event_ = event; ++event_publish_count_;
   }
   last_tracking_state_ = frame.tracking_state;
 
@@ -407,9 +423,19 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
       }
     }
   }
-  graph_pub_->publish(output); path_pub_->publish(path); last_graph_ = output; ++graph_publish_count_;
+  last_graph_ = output; ++graph_publish_count_;
   keyframe_markers.markers.push_back(keyframe_marker); loop_markers.markers.push_back(loop_marker);
-  keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
+  // Publish the graph_snapshot/path/marker bundle off the spin thread. A slow
+  // RELIABLE reader (e.g. the mapper or dashboard) can only stall this worker,
+  // never TrackStereo. Latest-wins: stale bundles are dropped, which is correct
+  // for transient_local depth-1 graph_snapshot and for the viz markers/path.
+  graph_publish_worker_->submit(
+      [this, output = std::move(output), path = std::move(path),
+       keyframe_markers = std::move(keyframe_markers),
+       loop_markers = std::move(loop_markers)] {
+        graph_pub_->publish(output); path_pub_->publish(path);
+        keyframes_pub_->publish(keyframe_markers); loops_pub_->publish(loop_markers);
+      });
   const auto evidence = classifyGraphDeltaEvidence(previous_graph_, graph);
   RCLCPP_INFO(get_logger(),
               "graph_observation stage=changed revision=%lu raw_loop_edges=%zu previous_baseline=%s extracted_loop_edges=%zu",
@@ -421,7 +447,7 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
     orb_slam3_msgs::msg::TrackingEvent event; event.header = header; event.type = type;
     event.graph_revision = graph.revision; event.map_id = graph.active_map_id;
     event.detail = "semantic graph evidence observed in snapshot delta";
-    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+    event_publish_worker_->submit([this, event]{ events_pub_->publish(event); }); last_event_ = event; ++event_publish_count_;
   }
   for (const auto& loop_edge : evidence.loop_edges) {
     orb_slam3_msgs::msg::TrackingEvent event; event.header = header;
@@ -431,7 +457,7 @@ void WrapperNode::publishGraph(const ORB_SLAM3::GraphSnapshot& graph, const std_
                    " classification=" + loop_edge.classification +
                    " maps=" + std::to_string(loop_edge.first_map_id) + "," + std::to_string(loop_edge.second_map_id) +
                    " active_map=" + std::to_string(loop_edge.active_map_id);
-    events_pub_->publish(event); last_event_ = event; ++event_publish_count_;
+    event_publish_worker_->submit([this, event]{ events_pub_->publish(event); }); last_event_ = event; ++event_publish_count_;
   }
   previous_graph_ = graph;
   last_graph_revision_ = graph.revision; last_tracked_.graph_revision = graph.revision;

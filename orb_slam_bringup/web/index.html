@@ -12,23 +12,73 @@
     <span id="conn" class="badge badge-disconnected">connecting</span>
     <span id="track" class="badge">--</span>
     <span id="recovery" class="badge" hidden>RECOVERY</span>
-    <span class="meta">track <b id="trackHz">0.0</b> Hz</span>
+    <span class="meta">backend track <b id="trackHz">0.0</b> Hz</span>
     <span class="meta">odom <b id="odomHz">0.0</b> Hz</span>
     <span class="meta">kp <b id="kp">0</b></span>
     <span class="spacer"></span>
     <span id="revisions" class="meta">g<b id="graphRev">0</b> / m<b id="mapRev">0</b></span>
+    <span id="loops" class="meta">loops <b id="loopCount">0</b></span>
     <span id="rebuild" class="meta"></span>
   </header>
 
+  <nav class="tabs" role="tablist">
+    <button id="tab-map" class="tab-btn active" role="tab" aria-selected="true" aria-controls="view-map">Map View</button>
+    <button id="tab-charts" class="tab-btn" role="tab" aria-selected="false" aria-controls="view-charts">Charts</button>
+  </nav>
+
   <main class="main">
-    <div class="map-region">
-      <canvas id="map"></canvas>
-      <div id="waiting" class="waiting">Waiting for committed map…</div>
-    </div>
-    <aside class="side">
-      <h2>Events</h2>
-      <ul id="events" class="events"></ul>
-    </aside>
+    <section id="view-map" class="view view-map-layout" role="tabpanel" aria-labelledby="tab-map">
+      <div class="panel panel-map">
+        <div class="panel-title">Map + robot</div>
+        <div class="canvas-wrap">
+          <canvas id="map"></canvas>
+          <div id="waiting" class="waiting">Waiting for committed map…</div>
+        </div>
+      </div>
+      <aside class="side charts-stack">
+        <div class="panel panel-small-chart">
+          <div class="panel-title">Backend track rate <span class="hz" id="chartTrackHzNow">0.0 Hz</span></div>
+          <div class="canvas-wrap"><canvas id="chartTrackHz"></canvas></div>
+        </div>
+        <div class="panel panel-small-chart">
+          <div class="panel-title">Odom rate <span class="hz" id="chartOdomHzNow">0.0 Hz</span></div>
+          <div class="canvas-wrap"><canvas id="chartOdomHz"></canvas></div>
+        </div>
+        <div class="panel panel-small-chart">
+          <div class="panel-title">Tracked keypoints <span class="hz" id="chartKpNow">0</span></div>
+          <div class="canvas-wrap"><canvas id="chartKp"></canvas></div>
+        </div>
+        <div class="panel panel-small-chart">
+          <div class="panel-title">Loop closures (cumulative) <span class="hz" id="chartLoopsNow">0</span></div>
+          <div class="canvas-wrap"><canvas id="chartLoops"></canvas></div>
+        </div>
+      </aside>
+    </section>
+
+    <section id="view-charts" class="view view-charts-layout" role="tabpanel" aria-labelledby="tab-charts" hidden>
+      <div class="charts-poses">
+        <div class="panel">
+          <div class="panel-title">Odometry (raw wheel) <span class="hz" id="odomHz2">0.0 Hz</span></div>
+          <div class="canvas-wrap"><canvas id="odom"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">ORB pose (raw) <span class="hz" id="orbHz">0.0 Hz</span></div>
+          <div class="canvas-wrap"><canvas id="orb"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Corrected pose (loop-optimized)</div>
+          <div class="canvas-wrap"><canvas id="corrected"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Loop closures <span class="hz" id="loopInfo">0 edges</span></div>
+          <div class="canvas-wrap"><canvas id="loopgraph"></canvas></div>
+        </div>
+      </div>
+      <aside class="side">
+        <h2>Events</h2>
+        <ul id="events" class="events"></ul>
+      </aside>
+    </section>
   </main>
 
   <script src="app.js"></script>

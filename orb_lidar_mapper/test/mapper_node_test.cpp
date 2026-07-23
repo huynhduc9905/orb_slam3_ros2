@@ -504,6 +504,31 @@ TEST_F(MapperNodeTest, OkTrackingProducesMapRevision1WithOccupiedAndFreeCells) {
   EXPECT_TRUE(has_free) << "Map has no free cells";
 }
 
+TEST_F(MapperNodeTest, WheelPathPublisherIsDisabledByDefault) {
+  EXPECT_TRUE(mapper_->get_publishers_info_by_topic("/orb_lidar/wheel_path").empty());
+}
+
+TEST_F(MapperNodeTest, OptionalWheelPathPublisherUsesBoundedHistory) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("publish_wheel_path", true),
+      rclcpp::Parameter("wheel_path_max_points", 2)});
+  recreateMapper(options);
+
+  publishWheelBurst(1, 3);
+  // Wait for the *final* burst sample to be reflected rather than merely for
+  // poses.size() == 2, which can also be true transiently (e.g. right after
+  // sample 2 lands, before sample 3 has been processed and evicts sample 1).
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_wheel_path_ && !last_wheel_path_->poses.empty() &&
+           last_wheel_path_->poses.back().header.stamp.sec == 3;
+  }));
+  ASSERT_TRUE(last_wheel_path_);
+  ASSERT_EQ(last_wheel_path_->poses.size(), 2u);
+  EXPECT_EQ(last_wheel_path_->poses[0].header.stamp.sec, 2);
+  EXPECT_EQ(last_wheel_path_->poses[1].header.stamp.sec, 3);
+}
+
 TEST_F(MapperNodeTest, PublishedMapAndRevisionUseOnePairingStamp) {
   publishStraightSweepWithTwoVisualAnchors();
   ASSERT_TRUE(waitForPublishedMap()) << endpoint_counts_before_sweep_ << ' ' << publicationHistory();

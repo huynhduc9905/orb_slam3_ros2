@@ -83,6 +83,13 @@ def test_bag_replay_forwards_sim_time_to_direct_dashboard():
     assert "foxglove_bridge" not in text
 
 
+def test_bag_replay_wires_profile_odometry_to_metrics_recorder():
+    profile = load_profile()
+    text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
+    assert '"wheel_odom_topic": profile["odometry"]["topic"]' in text
+    assert profile["odometry"]["topic"] == "/odom_wheel"
+
+
 def test_bag_replay_declares_explicit_tracking_benchmark_modes():
     text = BAG_REPLAY_LAUNCH_PATH.read_text(encoding="utf-8")
     assert '"benchmark_mode"' in text

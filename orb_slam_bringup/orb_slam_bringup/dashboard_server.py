@@ -14,13 +14,15 @@ from typing import Deque
 import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid, Odometry
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy, qos_profile_sensor_data)
 from visualization_msgs.msg import Marker
 
-from orb_slam3_msgs.msg import (MapRevision, RevisionedPath, TrackedFrame,
-                                TrackingEvent)
+from orb_slam3_msgs.msg import (GraphSnapshot, MapRevision, RevisionedPath,
+                                TrackedFrame, TrackingEvent)
 from orb_slam_bringup.dashboard_model import (DashboardModel, MapEnvelope,
                                                Pose2D, RevisionEnvelope,
                                                bounded_points)
@@ -59,6 +61,42 @@ class RateTracker:
     def _prune(self, now_s: float) -> None:
         while self._stamps and self._stamps[0] < now_s - self._window_s:
             self._stamps.popleft()
+
+
+class SourceRateTracker:
+    """Estimates the true source frequency from message header stamps rather
+    than receipt wall-time. Immune to receive jitter/bursts and to a saturated
+    dashboard: the header stamps carry the backend's own cadence. Uses the
+    median of consecutive inter-stamp deltas over a bounded window, which is
+    also robust to occasional dropped (best-effort) samples."""
+
+    def __init__(self, max_samples: int = 120) -> None:
+        self._max = max(3, int(max_samples))
+        self._stamps: Deque[float] = deque(maxlen=self._max)
+
+    def record(self, source_stamp_s: float) -> None:
+        if not math.isfinite(source_stamp_s):
+            return
+        # Ignore duplicate/non-monotonic stamps so deltas stay meaningful.
+        if self._stamps and source_stamp_s <= self._stamps[-1]:
+            return
+        self._stamps.append(float(source_stamp_s))
+
+    def reset(self) -> None:
+        self._stamps.clear()
+
+    def hz(self, now_s: float | None = None, stale_after_s: float = 2.0) -> float:
+        if len(self._stamps) < 2:
+            return 0.0
+        # If the newest sample is older than stale_after_s of source time, the
+        # stream has stopped — report 0 rather than a phantom rate.
+        if now_s is not None and math.isfinite(now_s) and now_s - self._stamps[-1] > stale_after_s:
+            return 0.0
+        deltas = sorted(self._stamps[i] - self._stamps[i - 1]
+                        for i in range(1, len(self._stamps)))
+        mid = len(deltas) // 2
+        median = deltas[mid] if len(deltas) % 2 else 0.5 * (deltas[mid - 1] + deltas[mid])
+        return 1.0 / median if median > 0.0 else 0.0
 
 
 def stamp_key(stamp) -> tuple[int, int]:
@@ -106,7 +144,8 @@ class DashboardServer(Node):
             "corrected_path_topic": "/orb_lidar/corrected_path_revisioned",
             "provisional_scan_topic": "/orb_lidar/provisional_scan",
             "odom_topic": "/odom_wheel", "tracked_frame_topic": "/orb_slam3/tracked_frame",
-            "events_topic": "/orb_slam3/events"}.items():
+            "events_topic": "/orb_slam3/events",
+            "graph_snapshot_topic": "/orb_slam3/graph_snapshot"}.items():
             self.declare_parameter(name, value)
         gp = self.get_parameter
         self._host, self._port = gp("host").value, int(gp("port").value)
@@ -115,24 +154,43 @@ class DashboardServer(Node):
         self._web_dir = FsPath(self._resolve_web_dir(gp("web_dir").value)).resolve()
         self._model = DashboardModel()
         self._events: Deque[dict] = deque(maxlen=MAX_EVENTS)
-        self._tracking_rate, self._odom_rate = RateTracker(float(gp("rate_window_s").value)), RateTracker(float(gp("rate_window_s").value))
-        reliable10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
-                                history=HistoryPolicy.KEEP_LAST)
-        reliable_tl = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
-                                  durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        # Backend-cadence rate from message header stamps (not receipt time), so
+        # a busy dashboard never mis-reports the true tracking/odom frequency.
+        self._tracking_rate = SourceRateTracker()
+        self._odom_rate = SourceRateTracker()
+        # Split heavy map/PNG work from lightweight state so a MultiThreadedExecutor
+        # keeps draining pose/odom/graph while a map render is in flight.
+        self._map_cbg = MutuallyExclusiveCallbackGroup()
+        self._state_cbg = MutuallyExclusiveCallbackGroup()
+        # Read-only viewer: BEST_EFFORT so the dashboard can never backpressure the
+        # mapper/wrapper reliable writers (an external reliable reader was measured
+        # to degrade tracking). Events stay reliable — they are low-rate and drive
+        # loss/recovery state that must not be silently dropped.
+        best_effort1 = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST)
+        best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                   history=HistoryPolicy.KEEP_LAST)
         reliable100 = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
                                  history=HistoryPolicy.KEEP_LAST)
-        self.create_subscription(OccupancyGrid, gp("map_topic").value, self._on_map, reliable_tl)
-        self.create_subscription(MapRevision, gp("map_revision_topic").value, self._on_map_revision, reliable_tl)
-        self.create_subscription(RevisionedPath, gp("corrected_path_topic").value, self._on_corrected_path, reliable_tl)
-        self.create_subscription(Marker, gp("provisional_scan_topic").value, self._on_provisional_scan, reliable10)
-        self.create_subscription(Odometry, gp("odom_topic").value, self._on_odom, qos_profile_sensor_data)
-        self.create_subscription(TrackedFrame, gp("tracked_frame_topic").value, self._on_tracked_frame, qos_profile_sensor_data)
-        self.create_subscription(TrackingEvent, gp("events_topic").value, self._on_event, reliable100)
+        self.create_subscription(OccupancyGrid, gp("map_topic").value, self._on_map,
+                                 best_effort1, callback_group=self._map_cbg)
+        self.create_subscription(MapRevision, gp("map_revision_topic").value, self._on_map_revision,
+                                 best_effort10, callback_group=self._map_cbg)
+        self.create_subscription(RevisionedPath, gp("corrected_path_topic").value, self._on_corrected_path,
+                                 best_effort1, callback_group=self._state_cbg)
+        self.create_subscription(Marker, gp("provisional_scan_topic").value, self._on_provisional_scan,
+                                 best_effort1, callback_group=self._state_cbg)
+        self.create_subscription(GraphSnapshot, gp("graph_snapshot_topic").value, self._on_graph,
+                                 best_effort1, callback_group=self._state_cbg)
+        self.create_subscription(Odometry, gp("odom_topic").value, self._on_odom,
+                                 qos_profile_sensor_data, callback_group=self._state_cbg)
+        self.create_subscription(TrackedFrame, gp("tracked_frame_topic").value, self._on_tracked_frame,
+                                 qos_profile_sensor_data, callback_group=self._state_cbg)
+        self.create_subscription(TrackingEvent, gp("events_topic").value, self._on_event,
+                                 reliable100, callback_group=self._state_cbg)
         map_rate = float(gp("map_rate_hz").value)
         if map_rate > 0:
-            self.create_timer(1.0 / map_rate, self._render_map)
+            self.create_timer(1.0 / map_rate, self._render_map, callback_group=self._map_cbg)
         self._httpd = ThreadingHTTPServer((self._host, self._port), self._make_handler())
         self._http_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._http_thread.start()
@@ -178,7 +236,7 @@ class DashboardServer(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         now = self._now_s()
-        self._odom_rate.record(now)
+        self._odom_rate.record(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
         self._model.update_wheel(pose2d(msg.pose.pose), now)
 
     def _on_tracked_frame(self, msg: TrackedFrame) -> None:
@@ -186,7 +244,18 @@ class DashboardServer(Node):
         state = TRACKING_STATE_NAMES.get(int(msg.tracking_state), "NO_IMAGES_YET")
         self._model.update_tracked(state, pose2d(msg.pose) if msg.pose_valid else None,
                                    int(msg.tracked_keypoints), now)
-        self._tracking_rate.record(now)
+        self._tracking_rate.record(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+
+    def _on_graph(self, msg: GraphSnapshot) -> None:
+        keyframes = []
+        for kf in msg.keyframes:
+            if bool(kf.bad):
+                continue
+            p = kf.pose.position
+            keyframes.append((int(kf.id), float(p.x), float(p.y)))
+        loop_edges = [(int(e.from_id), int(e.to_id)) for e in msg.loop_edges]
+        self._model.update_graph(int(msg.revision), bool(msg.active_map_connected),
+                                 keyframes, loop_edges)
 
     def _on_event(self, msg: TrackingEvent) -> None:
         now = self._now_s()
@@ -213,7 +282,7 @@ class DashboardServer(Node):
         now = self._now_s()
         state = self._model.snapshot(now)
         state["tracking"]["hz"] = round(self._tracking_rate.hz(now), 1)
-        state["odom"] = {"hz": round(self._odom_rate.hz(now), 1)}
+        state.setdefault("odom", {})["hz"] = round(self._odom_rate.hz(now), 1)
         state["events"] = list(self._events)[-30:][::-1]
         state["paths"]["corrected"] = state["paths"].get("corrected", [])
         return json.dumps(state).encode("utf-8")
@@ -239,9 +308,28 @@ class DashboardServer(Node):
                     png = server.map_png()
                     self._send(200 if png else 503, "image/png" if png else "text/plain", png or b"no map yet", True); return
                 rel = "index.html" if path in ("/", "") else path.lstrip("/")
-                fpath = (web_dir / rel).resolve()
-                try: fpath.relative_to(web_dir)
-                except ValueError: self._send(404, "text/plain", b"not found"); return
+                # web_dir is resolved once at startup. With colcon
+                # --symlink-install, every FILE under web_dir is itself a
+                # symlink back into the source tree by design, so fully
+                # resolving the candidate file (following that symlink) and
+                # checking containment against web_dir would reject every
+                # legitimate file. Instead we resolve only the *directory*
+                # component of the request (collapsing any ".." segments)
+                # and require that resolved directory to be web_dir itself
+                # or a real descendant of it; the final filename is then
+                # joined unresolved, so its own symlink target is irrelevant
+                # to the traversal check. This still blocks "../" escapes,
+                # which escape via the directory component, not the leaf.
+                rel_path = FsPath(rel)
+                if rel_path.is_absolute() or not rel_path.name:
+                    self._send(404, "text/plain", b"not found"); return
+                try:
+                    dir_resolved = (web_dir / rel_path.parent).resolve()
+                    if dir_resolved != web_dir:
+                        dir_resolved.relative_to(web_dir)
+                except (OSError, ValueError):
+                    self._send(404, "text/plain", b"not found"); return
+                fpath = dir_resolved / rel_path.name
                 if not fpath.is_file(): self._send(404, "text/plain", b"not found"); return
                 ctype = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png"}.get(fpath.suffix, "application/octet-stream")
                 self._send(200, ctype, fpath.read_bytes())
@@ -255,10 +343,18 @@ class DashboardServer(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = DashboardServer()
-    try: rclpy.spin(node)
+    # SingleThreadedExecutor: a MultiThreadedExecutor (even capped) busy-loops
+    # rebuilding its wait set in Python whenever a thread wakes on a message
+    # whose MutuallyExclusive callback group is already running on another
+    # thread, pegging a core. One thread drains callbacks sequentially and
+    # blocks in rcl_wait when idle. The 1 Hz, few-ms map render briefly sharing
+    # this thread with pose/state updates is imperceptible at the 15 Hz poll.
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    try: executor.spin()
     except KeyboardInterrupt: pass
     finally:
-        node.shutdown_http(); node.destroy_node(); rclpy.shutdown()
+        node.shutdown_http(); executor.remove_node(node); node.destroy_node(); rclpy.shutdown()
 
 
 if __name__ == "__main__": main()

@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -95,6 +97,17 @@ private:
   double visual_anchor_max_gap_ms_;
   double pending_scan_timeout_s_;
   std::int64_t pending_scan_limit_;
+  // Legacy Foxglove dashboard compatibility. Disabled by default because the
+  // active dashboard and artifact recorder consume raw wheel odometry instead.
+  // When explicitly enabled, the published path is capped to this many poses.
+  bool publish_wheel_path_;
+  std::int64_t wheel_path_max_points_;
+  // Viewer-side map broadcast throttle: republishing the full OccupancyGrid on
+  // every incremental commit (~18 Hz x ~200 KB) saturated subscribers' DDS
+  // receive/deserialize path. This caps the *broadcast* rate of the heavy grid
+  // (the internal TiledOccupancyGrid still updates every commit); full rebuilds
+  // (loop closure) and failures always bypass the throttle.
+  double map_publish_min_interval_s_;
 
   // ── Core objects (all accessed only from subscription callbacks / mutex) ──
   std::mutex mutex_;
@@ -113,6 +126,10 @@ private:
   // Tracking state
   bool was_lost_{false};       // true while we are in a LOST interval
   uint64_t last_graph_revision_{0};
+  // Wall-clock (steady) nanoseconds of the last heavy grid broadcast, for the
+  // viewer-side publish throttle. Accessed from the rebuilder worker thread(s).
+  std::atomic<std::int64_t> last_map_grid_publish_ns_{
+      std::numeric_limits<std::int64_t>::min()};
 
   // Diagnostic counters
   std::atomic<uint64_t> tf_lookup_failures_{0};
@@ -129,8 +146,9 @@ private:
   std::atomic<uint64_t> imu_samples_{0};
   std::atomic<uint64_t> imu_deskew_fallbacks_{0};
 
-  // Wheel path accumulation (guarded by mutex_)
-  std::vector<geometry_msgs::msg::PoseStamped> wheel_poses_;
+  // Bounded legacy wheel-path accumulation (guarded by mutex_ and only used
+  // when publish_wheel_path_ is enabled).
+  std::deque<geometry_msgs::msg::PoseStamped> wheel_poses_;
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

@@ -332,6 +332,7 @@ def _setup(context, *args, **kwargs):
                         "bag_duration_s": float(profile.get("bag", {}).get("duration_s", 0.0)),
                         "config_path": str(profile_path),
                         "repo_dir": str(Path(__file__).resolve().parents[2]),
+                        "wheel_odom_topic": profile["odometry"]["topic"],
                         # Soft expected count for report gates; bag-specific.
                         # 0 disables strict expected-pairs matching (recorder still counts).
                         "expected_stereo_pairs": int(

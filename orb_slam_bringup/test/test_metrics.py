@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 from pathlib import Path
@@ -378,6 +379,62 @@ def test_map_revision_png_gate_rate_limits():
     gate2 = MapRevisionPngGate(min_interval_s=0.0)
     assert gate2.should_write(t=0.0, map_revision=1) is True
     assert gate2.should_write(t=0.01, map_revision=2) is True
+
+
+def test_wheel_odometry_trajectory_is_appended_and_has_artifact_shape(tmp_path: Path):
+    """Raw profile odometry feeds both metrics trajectories and CSV artifacts."""
+    from nav_msgs.msg import Odometry
+    from orb_slam_bringup.metrics_recorder import (
+        MetricsRecorderNode,
+        write_trajectory_csv,
+    )
+
+    class Recorder:
+        def __init__(self):
+            self._wheel_traj = []
+
+        def _stamp_to_s(self, stamp):
+            return MetricsRecorderNode._stamp_to_s(self, stamp)
+
+    recorder = Recorder()
+    for sec, nanosec, x, y, yaw in (
+        (3, 250_000_000, 1.5, -2.0, math.pi / 2),
+        (4, 0, 2.5, -1.0, 0.0),
+    ):
+        msg = Odometry()
+        msg.header.stamp.sec = sec
+        msg.header.stamp.nanosec = nanosec
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.orientation.z = math.sin(yaw / 2)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2)
+        MetricsRecorderNode._on_wheel_odom(recorder, msg)
+
+    points = recorder._wheel_traj
+    expected_points = [
+        {"t": 3.25, "x": 1.5, "y": -2.0, "yaw": math.pi / 2},
+        {"t": 4.0, "x": 2.5, "y": -1.0, "yaw": 0.0},
+    ]
+    assert len(points) == len(expected_points)
+    for point, expected in zip(points, expected_points):
+        assert point == pytest.approx(expected)
+    metrics = MetricsAggregator(
+        bag_duration_s=4.0, trajectories={"wheel": points}
+    ).compute()
+    assert metrics["trajectories"]["wheel"] == points
+
+    csv_path = tmp_path / "wheel_trajectory.csv"
+    write_trajectory_csv(csv_path, points)
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0].keys() == {"t", "x", "y", "yaw"}
+    expected_rows = [
+        [3.25, 1.5, -2.0, math.pi / 2],
+        [4.0, 2.5, -1.0, 0.0],
+    ]
+    for row, expected_row in zip(rows, expected_rows):
+        actual = [float(row[key]) for key in ("t", "x", "y", "yaw")]
+        assert actual == pytest.approx(expected_row)
 
 
 def test_event_jsonl_writer_keeps_handle_and_appends(tmp_path: Path):

@@ -1041,6 +1041,7 @@ class MetricsRecorderNode:
         n.declare_parameter(
             "right_camera_info_topic", "/camera/camera/infra2/camera_info"
         )
+        n.declare_parameter("wheel_odom_topic", "/odom_wheel")
         if not n.has_parameter("use_sim_time"):
             n.declare_parameter("use_sim_time", True)
 
@@ -1076,8 +1077,15 @@ class MetricsRecorderNode:
             .string_value
             or "/camera/camera/infra2/camera_info"
         )
+        self._wheel_odom_topic = (
+            n.get_parameter("wheel_odom_topic")
+            .get_parameter_value()
+            .string_value
+            or "/odom_wheel"
+        )
         left_info_topic = self._left_info_topic
         right_info_topic = self._right_info_topic
+        wheel_odom_topic = self._wheel_odom_topic
 
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self._artifact_dir / "events.jsonl"
@@ -1128,8 +1136,9 @@ class MetricsRecorderNode:
 
         from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
-        # Separate groups so MultiThreadedExecutor can service tracked_frame
-        # while a map/PNG-related callback is busy.
+        # Keep callback isolation explicit. The intentionally single-threaded
+        # executor below serializes these groups; PNG encode/write is dispatched
+        # to MapRevisionPngQueue instead of requiring executor parallelism.
         self._tracking_cb_group = MutuallyExclusiveCallbackGroup()
         self._map_cb_group = MutuallyExclusiveCallbackGroup()
         self._misc_cb_group = MutuallyExclusiveCallbackGroup()
@@ -1153,15 +1162,14 @@ class MetricsRecorderNode:
             history=HistoryPolicy.KEEP_LAST,
             depth=200,  # was 50; absorb brief map-side stalls
         )
-        # Sensor-data QoS for bag camera streams (BEST_EFFORT KEEP_LAST)
+        # Sensor-data QoS for bag camera and wheel odometry streams.
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
 
-        from nav_msgs.msg import OccupancyGrid
-        from nav_msgs.msg import Path as NavPath
+        from nav_msgs.msg import OccupancyGrid, Odometry
         from sensor_msgs.msg import CameraInfo
         from orb_slam3_msgs.msg import (
             MapRevision,
@@ -1207,10 +1215,10 @@ class MetricsRecorderNode:
             callback_group=self._misc_cb_group,
         )
         n.create_subscription(
-            NavPath,
-            "/orb_lidar/wheel_path",
-            self._on_wheel_path,
-            reliable,
+            Odometry,
+            wheel_odom_topic,
+            self._on_wheel_odom,
+            sensor_qos,
             callback_group=self._misc_cb_group,
         )
         n.create_subscription(
@@ -1473,21 +1481,17 @@ class MetricsRecorderNode:
         if pts:
             self._corrected_traj = pts
 
-    def _on_wheel_path(self, msg) -> None:
-        pts: List[Dict[str, float]] = []
-        for ps in msg.poses:
-            t = self._stamp_to_s(ps.header.stamp)
-            q = ps.pose.orientation
-            pts.append(
-                {
-                    "t": t,
-                    "x": float(ps.pose.position.x),
-                    "y": float(ps.pose.position.y),
-                    "yaw": yaw_from_quaternion(q.x, q.y, q.z, q.w),
-                }
-            )
-        if pts:
-            self._wheel_traj = pts
+    def _on_wheel_odom(self, msg) -> None:
+        pose = msg.pose.pose
+        q = pose.orientation
+        self._wheel_traj.append(
+            {
+                "t": self._stamp_to_s(msg.header.stamp),
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "yaw": yaw_from_quaternion(q.x, q.y, q.z, q.w),
+            }
+        )
 
     def _on_diagnostics(self, msg) -> None:
         for s in msg.status:
@@ -1730,13 +1734,15 @@ def _verify_nav2_map(grid: MapGridSample, stem: Path) -> bool:
 
 def main(args=None) -> None:
     import rclpy
-    from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+    from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 
     rclpy.init(args=args)
     recorder = MetricsRecorderNode()
     node = recorder.node
-    # Multi-threaded so map/PNG-related work cannot starve tracked_frame.
-    executor = MultiThreadedExecutor(num_threads=4)
+    # SingleThreadedExecutor intentionally avoids the MultiThreadedExecutor
+    # busy-wait when mutually-exclusive callback groups contend. Map PNG
+    # encode/write already runs in MapRevisionPngQueue, outside this executor.
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

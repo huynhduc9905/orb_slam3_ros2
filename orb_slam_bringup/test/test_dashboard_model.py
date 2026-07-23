@@ -10,10 +10,10 @@ orb_slam_bringup.__path__.append(str(Path(__file__).resolve().parents[1] / "orb_
 import pytest
 
 from orb_slam_bringup.dashboard_model import (
-    MAX_CORRECTED_POINTS,
+    DISPLAY_TRAIL_POINTS,
     MAX_PROVISIONAL_POINTS,
+    MAX_TRAIL_HISTORY,
     MAX_UNMATCHED,
-    MAX_WHEEL_POINTS,
     DashboardModel,
     MapEnvelope,
     Pose2D,
@@ -127,10 +127,10 @@ def test_ingested_compact_cells_do_not_alias_mutable_source():
 
 def test_corrected_path_replacement_and_endpoint_bounds():
     model = DashboardModel()
-    points = [Pose2D(float(i), float(i), 0.0) for i in range(MAX_CORRECTED_POINTS + 7)]
+    points = [Pose2D(float(i), float(i), 0.0) for i in range(DISPLAY_TRAIL_POINTS + 7)]
     model.replace_corrected_path(12, points)
     snap = model.snapshot(0)
-    assert len(snap["paths"]["corrected"]) <= MAX_CORRECTED_POINTS
+    assert len(snap["paths"]["corrected"]) <= DISPLAY_TRAIL_POINTS
     assert snap["paths"]["corrected"][0] == {"x": 0.0, "y": 0.0, "yaw": 0.0}
     assert snap["paths"]["corrected"][-1]["x"] == float(len(points) - 1)
     model.replace_corrected_path(13, [Pose2D(9.0, 8.0, 0.5)])
@@ -359,14 +359,113 @@ def test_provisional_points_are_bounded():
     assert len(model.snapshot(0)["paths"]["provisional"]) <= MAX_PROVISIONAL_POINTS
 
 
+def test_odom_trail_retains_full_path_with_uniform_density():
+    # Regression: previously the internal trail was destructively re-strided on
+    # every append, which decimated the OLD portion far more than the recent
+    # portion, so the rendered path faceted into a polygon at its start while
+    # staying smooth near the robot. The trail must now span the whole path
+    # (first sample kept) at roughly uniform spacing end to end.
+    model = DashboardModel()
+    n = DISPLAY_TRAIL_POINTS * 6  # well past the display cap, within history cap
+    for i in range(n):
+        model.update_wheel(Pose2D(float(i), 0.0, 0.0), float(i))
+    trail = model.snapshot(float(n))["odom"]["trail"]
+    assert len(trail) <= DISPLAY_TRAIL_POINTS
+    # Whole path present: first raw sample and last raw sample both retained.
+    assert trail[0]["x"] == 0.0
+    assert trail[-1]["x"] == float(n - 1)
+    # Uniform spacing: sample an early gap and a mid-path gap; both should match
+    # (previously the old/start gap blew up ~60-90x vs the recent gap). The very
+    # last gap is skipped because bounded_points tacks on the exact final point,
+    # leaving a remainder gap that is not a density signal.
+    early_gap = trail[1]["x"] - trail[0]["x"]
+    mid = len(trail) // 2
+    mid_gap = trail[mid]["x"] - trail[mid - 1]["x"]
+    assert early_gap > 0 and mid_gap > 0
+    assert early_gap == mid_gap
+
+
+def test_trail_history_is_bounded_by_safety_cap():
+    # Past the generous safety cap the oldest points are dropped (drop-oldest,
+    # not re-strided), so memory stays bounded on very long live sessions.
+    model = DashboardModel()
+    for i in range(MAX_TRAIL_HISTORY + 500):
+        model.update_wheel(Pose2D(float(i), 0.0, 0.0), float(i))
+    assert len(model._odom_trail) == MAX_TRAIL_HISTORY
+    # The retained window ends at the most recent sample.
+    assert model._odom_trail[-1].x == float(MAX_TRAIL_HISTORY + 499)
+
+
 def test_transformed_fallback_trail_is_bounded():
     model = DashboardModel()
     model.update_tracked("OK", Pose2D(0, 0, 0), 1, 0)
     model.update_wheel(Pose2D(0, 0, 0), 0)
     model.start_loss(1, 1)
-    for i in range(MAX_WHEEL_POINTS + 7):
+    for i in range(DISPLAY_TRAIL_POINTS + 7):
         model.update_wheel(Pose2D(float(i), 0, 0), float(i + 2))
-    trail = model.snapshot(float(MAX_WHEEL_POINTS + 9))["fallback"]["trail"]
-    assert len(trail) <= MAX_WHEEL_POINTS
+    trail = model.snapshot(float(DISPLAY_TRAIL_POINTS + 9))["fallback"]["trail"]
+    assert len(trail) <= DISPLAY_TRAIL_POINTS
     assert trail[0] == {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    assert trail[-1]["x"] == float(MAX_WHEEL_POINTS + 6)
+    assert trail[-1]["x"] == float(DISPLAY_TRAIL_POINTS + 6)
+
+
+
+def test_snapshot_decimates_keyframe_node_cloud():
+    from orb_slam_bringup.dashboard_model import DISPLAY_GRAPH_NODES
+    model = DashboardModel()
+    n = DISPLAY_GRAPH_NODES * 5
+    keyframes = [(i, float(i), float(i)) for i in range(n)]
+    model.update_graph(7, True, keyframes, [])
+    graph = model.snapshot(0)["graph"]
+    assert graph["revision"] == 7
+    # Node cloud is bounded for the payload...
+    assert len(graph["keyframes"]) <= DISPLAY_GRAPH_NODES
+    # ...but still spans the full trajectory (first and last kept).
+    assert graph["keyframes"][0]["id"] == 0
+    assert graph["keyframes"][-1]["id"] == n - 1
+
+
+def test_snapshot_resolves_loops_against_full_keyframe_set():
+    # A loop edge between the first and last keyframe must still resolve even
+    # though the last keyframe may be dropped from the decimated node cloud.
+    from orb_slam_bringup.dashboard_model import DISPLAY_GRAPH_NODES
+    model = DashboardModel()
+    n = DISPLAY_GRAPH_NODES * 5
+    keyframes = [(i, float(i), float(i * 2)) for i in range(n)]
+    model.update_graph(3, True, keyframes, [(0, n - 1)])
+    loops = model.snapshot(0)["graph"]["loops"]
+    assert len(loops) == 1
+    assert loops[0]["from"] == {"x": 0.0, "y": 0.0}
+    assert loops[0]["to"] == {"x": float(n - 1), "y": float((n - 1) * 2)}
+
+
+def test_snapshot_caps_loop_segment_count():
+    from orb_slam_bringup.dashboard_model import DISPLAY_LOOP_EDGES
+    model = DashboardModel()
+    n = DISPLAY_LOOP_EDGES * 3
+    keyframes = [(i, float(i), 0.0) for i in range(n + 1)]
+    loops = [(i, i + 1) for i in range(n)]
+    model.update_graph(1, True, keyframes, loops)
+    assert len(model.snapshot(0)["graph"]["loops"]) <= DISPLAY_LOOP_EDGES
+
+
+def test_copy_map_accepts_int8_array_and_preserves_values():
+    # Fast ROS path: OccupancyGrid.data arrives as a signed-byte array.
+    model = DashboardModel()
+    cells = array("b", [-1, 0, 100, 50])
+    model.ingest_map(MapEnvelope((5, 6), 0.05, 0.0, 0.0, 2, 2, cells))
+    model.ingest_revision(rv((5, 6), graph=1, revision=1))
+    candidate, _ = model.next_map_to_render()
+    assert list(candidate.cells) == [-1, 0, 100, 50]
+
+
+@pytest.mark.parametrize("cells", [
+    [[0, 100], [-1, 50]],  # outer len matches 2x1, but actual cell count is four
+    (0,),                  # flat, but too few cells for 2x1
+])
+def test_copy_map_rejects_nested_or_mismatched_cells_without_storing_envelope(cells):
+    model = DashboardModel()
+    with pytest.raises(ValueError, match="one-dimensional array matching dimensions"):
+        model.ingest_map(MapEnvelope((5, 7), 0.05, 0.0, 0.0, 2, 1, cells))
+    assert (5, 7) not in model._maps
+    assert model.next_map_to_render() is None
