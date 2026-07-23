@@ -6,6 +6,7 @@ import io
 import json
 import math
 import threading
+import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path as FsPath
@@ -156,8 +157,17 @@ class DashboardServer(Node):
         self._events: Deque[dict] = deque(maxlen=MAX_EVENTS)
         # Backend-cadence rate from message header stamps (not receipt time), so
         # a busy dashboard never mis-reports the true tracking/odom frequency.
-        self._tracking_rate = SourceRateTracker()
-        self._odom_rate = SourceRateTracker()
+        # Wall-clock receipt-rate trackers (time.monotonic) rather than
+        # source-header-stamp trackers: during bag replay at rate != 1x, message
+        # header stamps advance at sim time (1x rate == wall time), so
+        # header-stamp Hz always reports the bag's recording cadence (e.g. 30 Hz
+        # camera, 70 Hz odom) regardless of playback speed and can't tell you
+        # whether the pipeline is keeping up. Wall-clock rate honestly reports
+        # what the wrapper is actually processing per real second — it doubles
+        # at 2x replay, drops when the pipeline can't keep up, and matches wall
+        # time on a real robot (where sim time == wall time anyway).
+        self._tracking_rate = RateTracker(2.0)
+        self._odom_rate = RateTracker(2.0)
         # Split heavy map/PNG work from lightweight state so a MultiThreadedExecutor
         # keeps draining pose/odom/graph while a map render is in flight.
         self._map_cbg = MutuallyExclusiveCallbackGroup()
@@ -251,7 +261,7 @@ class DashboardServer(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         now = self._now_s()
-        self._odom_rate.record(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        self._odom_rate.record(time.monotonic())
         self._model.update_wheel(pose2d(msg.pose.pose), now)
 
     def _on_tracked_frame(self, msg: TrackedFrame) -> None:
@@ -259,7 +269,7 @@ class DashboardServer(Node):
         state = TRACKING_STATE_NAMES.get(int(msg.tracking_state), "NO_IMAGES_YET")
         self._model.update_tracked(state, pose2d(msg.pose) if msg.pose_valid else None,
                                    int(msg.tracked_keypoints), now)
-        self._tracking_rate.record(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        self._tracking_rate.record(time.monotonic())
 
     def _on_graph(self, msg: GraphSnapshot) -> None:
         keyframes = []
@@ -295,9 +305,13 @@ class DashboardServer(Node):
 
     def state_json(self) -> bytes:
         now = self._now_s()
+        wall_now = time.monotonic()
         state = self._model.snapshot(now)
-        state["tracking"]["hz"] = round(self._tracking_rate.hz(now), 1)
-        state.setdefault("odom", {})["hz"] = round(self._odom_rate.hz(now), 1)
+        # Rate readouts use wall-clock (time.monotonic), so 2x bag replay shows
+        # 2x rate and any pipeline slowdown is visible in real time. The rest of
+        # the state still uses ROS time (which is sim time during bag replay).
+        state["tracking"]["hz"] = round(self._tracking_rate.hz(wall_now), 1)
+        state.setdefault("odom", {})["hz"] = round(self._odom_rate.hz(wall_now), 1)
         state["events"] = list(self._events)[-30:][::-1]
         state["paths"]["corrected"] = state["paths"].get("corrected", [])
         return json.dumps(state).encode("utf-8")
