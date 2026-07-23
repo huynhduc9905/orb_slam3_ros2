@@ -162,23 +162,30 @@ class DashboardServer(Node):
         # keeps draining pose/odom/graph while a map render is in flight.
         self._map_cbg = MutuallyExclusiveCallbackGroup()
         self._state_cbg = MutuallyExclusiveCallbackGroup()
-        # Read-only viewer: BEST_EFFORT so the dashboard can never backpressure the
-        # mapper/wrapper reliable writers (an external reliable reader was measured
-        # to degrade tracking). Events stay reliable — they are low-rate and drive
+        # Read-only viewer: BEST_EFFORT for the high-rate pose/odom/graph windows
+        # so the dashboard can never backpressure the mapper/wrapper reliable
+        # writers (an external reliable reader on those high-rate topics was
+        # measured to degrade tracking). Events stay reliable — low-rate, drive
         # loss/recovery state that must not be silently dropped.
-        # Map grid + revision: BEST_EFFORT with generous depth. RELIABLE +
-        # TRANSIENT_LOCAL was attempted but the large ~200 KB OccupancyGrid was
-        # silently undelivered by FastDDS when the Python process couldn't
-        # service the reliable handshake fast enough during high-rate callback
-        # bursts. BEST_EFFORT depth=5 catches rebuild publications reliably in
-        # practice since the mapper publishes on every graph snapshot (~1 Hz).
+        #
+        # Map grid + revision MUST be RELIABLE: the ~200 KB OccupancyGrid is
+        # fragmented into many UDP datagrams, and BEST_EFFORT silently discards
+        # the entire sample if any single fragment is lost under load — so the
+        # grid arrived only intermittently while the tiny (single-datagram)
+        # MapRevision always did, leaving the map perpetually unrendered. RELIABLE
+        # retransmits lost fragments; TRANSIENT_LOCAL latches the last map for a
+        # late-joining dashboard. This is low-rate (one publication per graph
+        # snapshot / loop closure), so it cannot backpressure tracking. The
+        # subscription lives in _state_cbg (not _map_cbg) so it is actually
+        # serviced — the _map_cbg render timer would otherwise starve it.
         best_effort1 = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                                   history=HistoryPolicy.KEEP_LAST)
         best_effort10 = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
                                    history=HistoryPolicy.KEEP_LAST)
         reliable100 = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
                                  history=HistoryPolicy.KEEP_LAST)
-        map_sub_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
+        map_sub_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                  history=HistoryPolicy.KEEP_LAST)
         self.create_subscription(OccupancyGrid, gp("map_topic").value, self._on_map,
                                  map_sub_qos, callback_group=self._state_cbg)

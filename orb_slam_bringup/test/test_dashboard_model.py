@@ -42,6 +42,35 @@ def assert_pair(pair, expected_map, expected_revision):
     assert actual_revision == expected_revision
 
 
+def test_trailing_idle_revision_does_not_clobber_published_for_render():
+    # Regression: the mapper emits PUBLISHED then a trailing IDLE for the SAME
+    # stamp (rebuilder quiescent-idle emit). An unconditional per-stamp overwrite
+    # let IDLE replace PUBLISHED, so next_map_to_render never found a candidate
+    # and the map never rendered (most visible in rebuild-only mode).
+    model = DashboardModel()
+    stamp = (5, 0)
+    model.ingest_map(mp(stamp))
+    model.ingest_revision(rv(stamp, "PUBLISHED", revision=1))
+    # Trailing IDLE for the same stamp/revision must NOT hide the map.
+    model.ingest_revision(rv(stamp, "IDLE", revision=1))
+    pair = model.next_map_to_render()
+    assert pair is not None, "PUBLISHED map must remain renderable after trailing IDLE"
+    assert pair[1].map_revision == 1
+    # /state must still report the PUBLISHED revision.
+    assert model.snapshot(0.0)["map_revision"]["state"] == "PUBLISHED"
+
+
+def test_failed_revision_still_supersedes_published_for_same_stamp():
+    # A genuine PUBLISHED -> FAILED transition (higher priority) must still take
+    # effect: a failed rebuild should not remain renderable.
+    model = DashboardModel()
+    stamp = (6, 0)
+    model.ingest_map(mp(stamp))
+    model.ingest_revision(rv(stamp, "PUBLISHED", revision=2))
+    model.ingest_revision(rv(stamp, "FAILED", revision=2))
+    assert model.next_map_to_render() is None
+
+
 def test_pairing_works_in_either_arrival_order():
     for revision_first in (False, True):
         model = DashboardModel()

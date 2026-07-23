@@ -219,8 +219,18 @@ class DashboardModel:
                                       int(value.map_revision), int(value.committed_scan_count))
             if self._pending is not None and self._pending[1].stamp == copied.stamp:
                 self._pending = None
-            self._revisions[copied.stamp] = copied
-            self._revisions.move_to_end(copied.stamp)
+            # Retain the highest-priority revision per stamp. The mapper emits
+            # PUBLISHED and then a trailing IDLE for the SAME stamp (the
+            # rebuilder's quiescent-idle emit). An unconditional overwrite let
+            # IDLE clobber PUBLISHED, so next_map_to_render (which requires
+            # state == PUBLISHED) never found a render candidate and the map
+            # never rendered — most visible in rebuild-only mode where map
+            # publications are sparse. Order by _revision_order_key so IDLE(0)
+            # cannot displace PUBLISHED(2) but FAILED(3)/newer revisions still do.
+            existing = self._revisions.get(copied.stamp)
+            if existing is None or _revision_order_key(copied) >= _revision_order_key(existing):
+                self._revisions[copied.stamp] = copied
+                self._revisions.move_to_end(copied.stamp)
             if (self._latest_revision is None or
                     _revision_order_key(copied) > _revision_order_key(self._latest_revision)):
                 self._latest_revision = copied
