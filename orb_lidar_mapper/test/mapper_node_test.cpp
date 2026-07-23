@@ -1140,6 +1140,90 @@ TEST_F(MapperNodeTest, RebuildOnlyMapDisabledAllowsIncrementalPublish) {
   ASSERT_NE(last_map_, nullptr);
 }
 
+TEST_F(MapperNodeTest, PureAdditionGraphSnapshotSkipsFullRebuild) {
+  // A graph snapshot that only advances the revision without shifting any
+  // existing keyframe pose ("pure addition") must NOT trigger a new full
+  // rebuild. The map is already consistent; a rebuild would be pure waste.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", true)});
+  recreateMapper(options);
+
+  // Prime state: wheel odom + tracked frame + a scan, so at least one scan
+  // can be committed on the first graph snapshot.
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 300ms);
+
+  // Graph #1: first snapshot always takes the correction path (pose cache
+  // empty) and does a full rebuild.
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(3, rev1, 1, 0.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  const std::uint64_t first_map_revision = last_published_map_revision_->map_revision;
+  // Wait for the first rebuild's trailing IDLE emit so it doesn't leak into
+  // the count we compare against below.
+  spinFlush(mapper_, helper_, 300ms);
+  const std::size_t published_count_before = std::count_if(
+      map_revisions_.begin(), map_revisions_.end(),
+      [](const orb_slam3_msgs::msg::MapRevision& m) {
+        return m.state == orb_slam3_msgs::msg::MapRevision::PUBLISHED;
+      });
+
+  // Graph #2: same keyframe id + same pose, just a bumped graph revision.
+  // Fast-path detection must see zero pose shift and skip requestRebuild.
+  graph_pub_->publish(make_graph(4, rev1 + 1u, 1, 0.0));
+  spinFlush(mapper_, helper_, 800ms);
+
+  EXPECT_EQ(last_published_map_revision_->map_revision, first_map_revision)
+      << "Fast-path (no pose shift) snapshot must not trigger a new full rebuild";
+  const std::size_t published_count_after = std::count_if(
+      map_revisions_.begin(), map_revisions_.end(),
+      [](const orb_slam3_msgs::msg::MapRevision& m) {
+        return m.state == orb_slam3_msgs::msg::MapRevision::PUBLISHED;
+      });
+  EXPECT_EQ(published_count_after, published_count_before)
+      << "No new PUBLISHED MapRevision should follow a no-op fast-path snapshot";
+}
+
+TEST_F(MapperNodeTest, PoseShiftGraphSnapshotTriggersFullRebuild) {
+  // The counterpart of the fast-path test: if an existing keyframe pose
+  // shifts (loop closure / GBA correction), the mapper must take the
+  // correction path and produce a new full rebuild.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", true)});
+  recreateMapper(options);
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 300ms);
+
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(3, rev1, 1, 0.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  const std::uint64_t first_map_revision = last_published_map_revision_->map_revision;
+
+  // Graph #2: same keyframe id but SHIFTED map pose (kf_x moved from 0 to 1).
+  // The correction path must fire a full rebuild → new map_revision.
+  graph_pub_->publish(make_graph(4, rev1 + 1u, 1, 1.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this, first_map_revision] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->map_revision > first_map_revision;
+  }));
+}
+
 TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
   // Create with true production defaults (no test overrides).
   auto prod_mapper = std::make_shared<MapperNode>();

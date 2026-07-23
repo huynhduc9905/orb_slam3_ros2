@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -131,6 +132,15 @@ private:
   std::shared_ptr<ScanArchive> archive_;
   std::deque<PendingScan> pending_scans_;
   std::unordered_set<uint64_t> committed_scan_ids_;  // scan_ids already fed to rebuilder
+  // Cache of keyframe map poses from the last processed graph snapshot. Used
+  // by onGraphSnapshot to distinguish a "pure addition" snapshot (new keyframes
+  // only, no pose shift on any existing keyframe) from a real correction. On
+  // pure additions the map does not need a full rebuild — the existing grid is
+  // still consistent, and newly-committed scans can be appended incrementally
+  // at the (still valid) current keyframe pose. This lets us skip the O(N)
+  // full-rebuild work on the vast majority of graph snapshots, which are just
+  // new keyframes being added by ORB-SLAM3's LocalMapping thread.
+  std::unordered_map<uint64_t, Pose2> keyframe_pose_cache_;
 
   // TF
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
