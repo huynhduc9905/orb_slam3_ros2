@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+
 #include <KeyFrame.h>
 #include <LoopClosing.h>
 #include <Map.h>
 #include <Optimizer.h>
+#include "Thirdparty/g2o/g2o/core/sparse_optimizer.h"
 
 #include <set>
 #include <vector>
@@ -82,4 +85,16 @@ TEST(OptimizerEssentialGraphSafety, SizesMergeStateForForeignKeyframeIds) {
   EXPECT_NO_THROW(ORB_SLAM3::Optimizer::OptimizeEssentialGraph(
       &current_keyframe, fixed_kfs, fixed_corrected_kfs, non_fixed_kfs,
       non_corrected_mps));
+}
+
+
+TEST(OptimizerEssentialGraphSafety, AtomicG2oStopFlagTracksCancellation) {
+  g2o::SparseOptimizer optimizer;
+  std::atomic<bool> stop_requested{false};
+
+  optimizer.setForceStopFlag(&stop_requested);
+  EXPECT_FALSE(optimizer.terminate());
+
+  stop_requested.store(true);
+  EXPECT_TRUE(optimizer.terminate());
 }
