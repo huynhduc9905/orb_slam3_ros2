@@ -55,6 +55,17 @@ if(BUILD_TESTING)
     TIMEOUT 30
     ENVIRONMENT
       "ORB_TEST_VOCAB=${CMAKE_CURRENT_BINARY_DIR}/vocabulary/ORBvoc.txt;ORB_TEST_SETTINGS=${CMAKE_CURRENT_SOURCE_DIR}/../orb_slam3_wrapper/config/tasterobot_stereo.yaml")
+  ament_add_gtest(gba_shutdown_test test/gba_shutdown_test.cpp)
+  target_compile_definitions(gba_shutdown_test PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
+  target_link_libraries(gba_shutdown_test ORB_SLAM3::ORB_SLAM3)
+  set_tests_properties(gba_shutdown_test PROPERTIES
+    TIMEOUT 30
+    ENVIRONMENT
+      "ORB_TEST_VOCAB=${CMAKE_CURRENT_BINARY_DIR}/vocabulary/ORBvoc.txt;ORB_TEST_SETTINGS=${CMAKE_CURRENT_SOURCE_DIR}/../orb_slam3_wrapper/config/tasterobot_stereo.yaml")
+  ament_add_gtest(optimizer_essential_graph_safety_test test/optimizer_essential_graph_safety_test.cpp)
+  target_compile_definitions(optimizer_essential_graph_safety_test PRIVATE ORB_SLAM3_SNAPSHOT_TESTING)
+  target_link_libraries(optimizer_essential_graph_safety_test ORB_SLAM3::ORB_SLAM3)
+  set_tests_properties(optimizer_essential_graph_safety_test PROPERTIES TIMEOUT 10)
   add_test(NAME installed_consumer
     COMMAND ${CMAKE_COMMAND}
       -DTEST_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/installed_consumer
