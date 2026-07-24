@@ -6,6 +6,7 @@
 #include <Optimizer.h>
 
 #include <set>
+#include <vector>
 
 namespace {
 
@@ -58,4 +59,27 @@ TEST(OptimizerEssentialGraphSafety, SkipsNullAndNonMemberLoopEndpoints) {
   EXPECT_NO_THROW(ORB_SLAM3::Optimizer::OptimizeEssentialGraph4DoF(
       &map, &out_of_range_non_member, &current_keyframe, non_corrected,
       corrected, out_of_range_connections));
+}
+
+
+TEST(OptimizerEssentialGraphSafety, SizesMergeStateForForeignKeyframeIds) {
+  ORB_SLAM3::Map map;
+  ORB_SLAM3::KeyFrame current_keyframe;
+  ORB_SLAM3::KeyFrame foreign_non_member;
+
+  AddKeyFrame(map, current_keyframe, 0);
+  foreign_non_member.mnId = map.GetMaxKFid() + 100;
+  foreign_non_member.SetPose(Sophus::SE3f());
+
+  std::vector<ORB_SLAM3::KeyFrame*> fixed_kfs{&current_keyframe};
+  std::vector<ORB_SLAM3::KeyFrame*> fixed_corrected_kfs;
+  std::vector<ORB_SLAM3::KeyFrame*> non_fixed_kfs{&foreign_non_member};
+  std::vector<ORB_SLAM3::MapPoint*> non_corrected_mps;
+
+  // Merge inputs legitimately span maps and therefore can carry a global KF
+  // ID beyond current_keyframe's map-local GetMaxKFid(). The optimizer must
+  // size its ID-indexed state from all candidates before adding vertices.
+  EXPECT_NO_THROW(ORB_SLAM3::Optimizer::OptimizeEssentialGraph(
+      &current_keyframe, fixed_kfs, fixed_corrected_kfs, non_fixed_kfs,
+      non_corrected_mps));
 }
