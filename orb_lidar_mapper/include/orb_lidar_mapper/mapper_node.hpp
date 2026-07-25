@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -108,6 +109,19 @@ private:
   // (the internal TiledOccupancyGrid still updates every commit); full rebuilds
   // (loop closure) and failures always bypass the throttle.
   double map_publish_min_interval_s_;
+  // When true (default), the occupancy grid is only updated via full rebuilds
+  // (triggered by graph snapshots / loop closures), which re-raytrace all
+  // committed scans from their corrected poses on a fresh grid. This prevents
+  // ghost/doubled walls from incremental scans placed at drifted pre-correction
+  // poses. When false, scans are also inserted incrementally at commit time
+  // (lower latency to first map, but accumulates drift between corrections).
+  bool rebuild_only_map_;
+  // Wall-clock throttle for full rebuilds inside MapRebuilder. Rebuild work is
+  // O(committed_scans * rays_per_scan) and grows unboundedly during a session;
+  // without a throttle the rebuild worker saturates a core once the map is
+  // large. This defers the next full rebuild until at least this many seconds
+  // after the previous one completed. Zero disables the throttle.
+  double map_rebuild_min_interval_s_;
 
   // ── Core objects (all accessed only from subscription callbacks / mutex) ──
   std::mutex mutex_;
@@ -118,6 +132,15 @@ private:
   std::shared_ptr<ScanArchive> archive_;
   std::deque<PendingScan> pending_scans_;
   std::unordered_set<uint64_t> committed_scan_ids_;  // scan_ids already fed to rebuilder
+  // Cache of keyframe map poses from the last processed graph snapshot. Used
+  // by onGraphSnapshot to distinguish a "pure addition" snapshot (new keyframes
+  // only, no pose shift on any existing keyframe) from a real correction. On
+  // pure additions the map does not need a full rebuild — the existing grid is
+  // still consistent, and newly-committed scans can be appended incrementally
+  // at the (still valid) current keyframe pose. This lets us skip the O(N)
+  // full-rebuild work on the vast majority of graph snapshots, which are just
+  // new keyframes being added by ORB-SLAM3's LocalMapping thread.
+  std::unordered_map<uint64_t, Pose2> keyframe_pose_cache_;
 
   // TF
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

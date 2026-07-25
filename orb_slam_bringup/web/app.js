@@ -1,7 +1,8 @@
 // Custom read-only dashboard. Polls /state (~15 Hz) for smooth realtime pose
 // windows and reloads /map.png only when the map revision changes. No build
-// step, no external bridge. The reported track/odom rates are the BACKEND
-// cadence (from message header stamps), not what this page receives.
+// step, no external bridge. Track/odom Hz are wall-clock RECEIPT rates measured
+// server-side (dashboard receives = wrapper publishes), so they scale with bag
+// playback speed (2x replay -> 2x Hz) and drop when the pipeline can't keep up.
 "use strict";
 
 const el = (id) => document.getElementById(id);

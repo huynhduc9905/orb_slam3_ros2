@@ -816,19 +816,6 @@ index 0000000..9dc428d
 +}
 +
 +#endif
-diff --git a/include/LoopClosing.h b/include/LoopClosing.h
-index c9ccb26..7b6bfe0 100644
---- a/include/LoopClosing.h
-+++ b/include/LoopClosing.h
-@@ -223,7 +223,7 @@ protected:
-     bool mbFixScale;
- 
- 
--    bool mnFullBAIdx;
-+    int mnFullBAIdx;
- 
- 
- 
 diff --git a/include/Map.h b/include/Map.h
 index 0e0a49c..d9d22a7 100644
 --- a/include/Map.h

@@ -217,7 +217,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   pending_scan_limit_(declare_parameter("pending_scan_limit", 200)),
   publish_wheel_path_(declare_parameter("publish_wheel_path", false)),
   wheel_path_max_points_(declare_parameter("wheel_path_max_points", 1500)),
-  map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)) {
+  map_publish_min_interval_s_(declare_parameter("map_publish_min_interval_s", 0.5)),
+  rebuild_only_map_(declare_parameter("rebuild_only_map", true)),
+  map_rebuild_min_interval_s_(declare_parameter("map_rebuild_min_interval_s", 5.0)) {
 
   if (!std::isfinite(hit_range_max_m_) || !std::isfinite(hit_log_odds_) ||
       !std::isfinite(miss_log_odds_) || hit_range_max_m_ <= 0.0 ||
@@ -238,6 +240,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
   }
   if (!std::isfinite(map_publish_min_interval_s_) || map_publish_min_interval_s_ < 0.0) {
     throw std::invalid_argument("map_publish_min_interval_s must be finite and non-negative");
+  }
+  if (!std::isfinite(map_rebuild_min_interval_s_) || map_rebuild_min_interval_s_ < 0.0) {
+    throw std::invalid_argument("map_rebuild_min_interval_s must be finite and non-negative");
   }
   if (wheel_path_max_points_ <= 0) {
     throw std::invalid_argument("wheel_path_max_points must be positive");
@@ -268,7 +273,9 @@ MapperNode::MapperNode(const rclcpp::NodeOptions& options)
       grid_cfg,
       [this](std::shared_ptr<const MapSnapshot> snap, const RebuildStatus& status) {
         publishMapAndRevision(std::move(snap), status);
-      });
+      },
+      MapRebuilderTestHooks{},
+      map_rebuild_min_interval_s_);
 
   // QoS
   auto sensor_qos = rclcpp::SensorDataQoS();
@@ -446,9 +453,79 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
 
   traj_->applyGraphSnapshot(snap);
 
-  // After graph correction, rebuild from the corrected trajectory.
+  // Fast-path detection: distinguish a "pure addition" snapshot (new keyframes
+  // only, no pose shift on any existing keyframe) from a real correction
+  // (global bundle adjustment / loop closure that shifts existing keyframe
+  // poses). ORB-SLAM3's LocalMapping thread produces many "add keyframe" graph
+  // snapshots between corrections; on those, the existing grid is still fully
+  // consistent and we can just append newly-committed scans instead of
+  // discarding and re-raytracing every scan in the archive.
+  //
+  // A snapshot is a correction if ANY previously-cached keyframe (a) is missing
+  // from the new snapshot (culled), or (b) has an appreciably shifted map pose.
+  // The epsilon is well below the map resolution so intra-run pose jitter never
+  // triggers a false correction.
+  constexpr double kKfPoseEpsilon = 1e-4;
+  bool correction_occurred = keyframe_pose_cache_.empty();  // first snapshot always rebuilds
+  if (!correction_occurred) {
+    std::unordered_set<uint64_t> incoming_ids;
+    incoming_ids.reserve(snap.keyframes.size());
+    for (const auto& kf : snap.keyframes) incoming_ids.insert(kf.keyframe_id);
+    for (const auto& [id, _cached] : keyframe_pose_cache_) {
+      if (incoming_ids.count(id) == 0) { correction_occurred = true; break; }
+    }
+    if (!correction_occurred) {
+      for (const auto& kf : snap.keyframes) {
+        auto it = keyframe_pose_cache_.find(kf.keyframe_id);
+        if (it != keyframe_pose_cache_.end() && !it->second.isApprox(kf.map_pose, kKfPoseEpsilon)) {
+          correction_occurred = true;
+          break;
+        }
+      }
+    }
+  }
+  // Refresh the pose cache with the current snapshot regardless of outcome.
+  keyframe_pose_cache_.clear();
+  keyframe_pose_cache_.reserve(snap.keyframes.size());
+  for (const auto& kf : snap.keyframes) {
+    keyframe_pose_cache_.emplace(kf.keyframe_id, kf.map_pose);
+  }
+
   auto revision = traj_->snapshot();
 
+  // Fast path: no keyframe pose shifted. Append any newly-committed scans to
+  // the existing grid via the incremental path (safe because the current pose
+  // IS the corrected pose) and skip the O(N) filter + full-rebuild work.
+  if (!correction_occurred && snap.active_map_connected && !revision->scans.empty()) {
+    // Run pending scan processing first so scans newly committable via this
+    // snapshot's new keyframe anchors get added to archive_. In rebuild-only
+    // mode this skips appendCommitted at commit time; we drive the appends
+    // below at graph-snapshot time (when we know the current pose is a
+    // corrected pose, so drift artifacts can't sneak in).
+    processPendingScansLocked();
+    auto refreshed = traj_->snapshot();
+    // Build a scan_id -> archived-scan index once so the append loop is O(N).
+    // N is the archive size (typically 100-1500 scans across a full bag).
+    std::unordered_map<std::uint64_t, const ArchivedScan*> archive_index;
+    archive_index.reserve(archive_->scans.size());
+    for (const auto& arc : archive_->scans) archive_index.emplace(arc.scan_id, &arc);
+    for (const auto& sp : refreshed->scans) {
+      if (!sp.committed) continue;
+      auto it = archive_index.find(sp.scan_id);
+      if (it == archive_index.end()) continue;
+      // The rebuilder dedups via its own applied_scan_ids, so repeat calls for
+      // scans already in the grid are cheap no-ops.
+      rebuilder_->appendCommitted(*it->second, sp, snap.graph_revision);
+    }
+    publishCorrectedPath(refreshed);
+    if (was_lost_) {
+      was_lost_ = false;
+      deleteProvisionalMarkers();
+    }
+    return;
+  }
+
+  // Correction path (or first snapshot): rebuild from the corrected trajectory.
   // Build a filtered archive and trajectory containing only scan_ids present
   // in BOTH the archive and the trajectory. validate() requires exact parity.
   std::unordered_set<uint64_t> archived_ids;
@@ -492,14 +569,19 @@ void MapperNode::onGraphSnapshot(orb_slam3_msgs::msg::GraphSnapshot::ConstShared
     return;
   }
 
-  // Feed newly-committed scans incrementally as well.
-  for (const auto& sp : filtered_traj->scans) {
-    if (sp.committed && committed_scan_ids_.find(sp.scan_id) == committed_scan_ids_.end()) {
-      for (const auto& arc : filtered_arc->scans) {
-        if (arc.scan_id == sp.scan_id) {
-          rebuilder_->appendCommitted(arc, sp, snap.graph_revision);
-          committed_scan_ids_.insert(sp.scan_id);
-          break;
+  // Feed newly-committed scans incrementally as well. In rebuild-only mode the
+  // full rebuild re-raytraces every committed scan from corrected poses anyway,
+  // so we skip the incremental path (avoids a brief flash of partially-placed
+  // scans before the rebuild overwrites the grid).
+  if (!rebuild_only_map_) {
+    for (const auto& sp : filtered_traj->scans) {
+      if (sp.committed && committed_scan_ids_.find(sp.scan_id) == committed_scan_ids_.end()) {
+        for (const auto& arc : filtered_arc->scans) {
+          if (arc.scan_id == sp.scan_id) {
+            rebuilder_->appendCommitted(arc, sp, snap.graph_revision);
+            committed_scan_ids_.insert(sp.scan_id);
+            break;
+          }
         }
       }
     }
@@ -725,7 +807,14 @@ MapperNode::PendingScanResult MapperNode::processPendingScanLocked(
 
   if (placement->committed) {
     if (committed_scan_ids_.find(placement->scan_id) == committed_scan_ids_.end()) {
-      rebuilder_->appendCommitted(archived, *placement, last_graph_revision_);
+      // In rebuild-only mode, skip incremental grid insertion: scans placed at
+      // the current (potentially drifted) pose would produce ghost/doubled
+      // walls. The grid is only updated via full rebuilds (triggered by every
+      // graph snapshot), which re-raytrace all committed scans at their latest
+      // corrected poses from scratch.
+      if (!rebuild_only_map_) {
+        rebuilder_->appendCommitted(archived, *placement, last_graph_revision_);
+      }
       committed_scan_ids_.insert(placement->scan_id);
     }
     ++scans_committed_;

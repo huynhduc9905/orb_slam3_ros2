@@ -271,7 +271,14 @@ protected:
         });
 
     // Create fresh MapperNode — default parameters use the global topic names above.
-    mapper_ = std::make_shared<MapperNode>();
+    // Tests that rely on incremental map publication need rebuild_only_map=false;
+    // production default is true (rebuild-only for map accuracy).
+    rclcpp::NodeOptions default_opts;
+    default_opts.parameter_overrides({
+        rclcpp::Parameter("rebuild_only_map", false),
+        rclcpp::Parameter("map_rebuild_min_interval_s", 0.0),
+    });
+    mapper_ = std::make_shared<MapperNode>(default_opts);
 
     // Let subscriptions discover each other before publishing.
     spinFlush(mapper_, helper_, 200ms);
@@ -374,8 +381,23 @@ protected:
   }
 
   void recreateMapper(const rclcpp::NodeOptions& options) {
+    // Inject rebuild_only_map=false unless the caller explicitly overrides it,
+    // so existing incremental-publication tests keep working without changes.
+    // Also inject map_rebuild_min_interval_s=0.0 so back-to-back rebuild
+    // requests in tests aren't delayed by the production throttle default.
+    rclcpp::NodeOptions merged = options;
+    bool has_rebuild_only = false;
+    bool has_rebuild_interval = false;
+    for (const auto& p : merged.parameter_overrides()) {
+      if (p.get_name() == "rebuild_only_map") { has_rebuild_only = true; }
+      else if (p.get_name() == "map_rebuild_min_interval_s") { has_rebuild_interval = true; }
+    }
+    auto overrides = merged.parameter_overrides();
+    if (!has_rebuild_only) overrides.emplace_back("rebuild_only_map", false);
+    if (!has_rebuild_interval) overrides.emplace_back("map_rebuild_min_interval_s", 0.0);
+    merged.parameter_overrides(overrides);
     mapper_.reset();
-    mapper_ = std::make_shared<MapperNode>(options);
+    mapper_ = std::make_shared<MapperNode>(merged);
     spinFlush(mapper_, helper_, 200ms);
   }
 
@@ -1041,35 +1063,200 @@ TEST_F(MapperNodeTest, TrackedFrameWithoutWheelDataAtIngestionStillProducesCommi
 // ---------------------------------------------------------------------------
 // Test 7: Default parameters
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// rebuild_only_map: in default mode, no incremental map is published until a
+// graph snapshot triggers a full rebuild. This eliminates ghost walls from
+// scans placed at pre-correction (drifted) poses between loop closures.
+// ---------------------------------------------------------------------------
+TEST_F(MapperNodeTest, RebuildOnlyMapSkipsIncrementalAndPublishesOnFullRebuild) {
+  // Create mapper with production default: rebuild_only_map=true.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", true)});
+  recreateMapper(options);
+
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+
+  // Graph snapshot at revision 1 — commits the keyframe but also requests a
+  // full rebuild (which requires at least one committed scan in the archive).
+  const uint64_t revision = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(2, revision, 1));
+  spinFlush(mapper_, helper_, 300ms);
+
+  // Scan committed at t=2. In rebuild-only mode, appendCommitted is skipped,
+  // so no incremental map. A subsequent graph snapshot triggers the rebuild.
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 500ms);
+
+  // No map yet — incremental was skipped.
+  EXPECT_EQ(last_map_, nullptr)
+      << "rebuild_only_map=true should not produce an incremental map";
+
+  // A new graph snapshot triggers the full rebuild, which includes the scan.
+  graph_pub_->publish(make_graph(3, revision + 1u, 1));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  ASSERT_NE(last_map_, nullptr);
+  EXPECT_EQ(last_map_->header.frame_id, "orb_map");
+  // The rebuild produces occupied + free cells from the corrected pose.
+  bool has_occ = false, has_free = false;
+  for (int8_t c : last_map_->data) {
+    if (c > 50)             has_occ  = true;
+    if (c >= 0 && c <= 30)  has_free = true;
+  }
+  EXPECT_TRUE(has_occ);
+  EXPECT_TRUE(has_free);
+}
+
+TEST_F(MapperNodeTest, RebuildOnlyMapDisabledAllowsIncrementalPublish) {
+  // Opt out: rebuild_only_map=false restores incremental behaviour.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", false)});
+  recreateMapper(options);
+
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+
+  const uint64_t revision = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(2, revision, 1));
+  spinFlush(mapper_, helper_, 300ms);
+
+  // Scan should produce an incremental map publication immediately.
+  scan_pub_->publish(make_scan(2, 2.0f));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  ASSERT_NE(last_map_, nullptr);
+}
+
+TEST_F(MapperNodeTest, PureAdditionGraphSnapshotSkipsFullRebuild) {
+  // A graph snapshot that only advances the revision without shifting any
+  // existing keyframe pose ("pure addition") must NOT trigger a new full
+  // rebuild. The map is already consistent; a rebuild would be pure waste.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", true)});
+  recreateMapper(options);
+
+  // Prime state: wheel odom + tracked frame + a scan, so at least one scan
+  // can be committed on the first graph snapshot.
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 300ms);
+
+  // Graph #1: first snapshot always takes the correction path (pose cache
+  // empty) and does a full rebuild.
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(3, rev1, 1, 0.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  const std::uint64_t first_map_revision = last_published_map_revision_->map_revision;
+  // Wait for the first rebuild's trailing IDLE emit so it doesn't leak into
+  // the count we compare against below.
+  spinFlush(mapper_, helper_, 300ms);
+  const std::size_t published_count_before = std::count_if(
+      map_revisions_.begin(), map_revisions_.end(),
+      [](const orb_slam3_msgs::msg::MapRevision& m) {
+        return m.state == orb_slam3_msgs::msg::MapRevision::PUBLISHED;
+      });
+
+  // Graph #2: same keyframe id + same pose, just a bumped graph revision.
+  // Fast-path detection must see zero pose shift and skip requestRebuild.
+  graph_pub_->publish(make_graph(4, rev1 + 1u, 1, 0.0));
+  spinFlush(mapper_, helper_, 800ms);
+
+  EXPECT_EQ(last_published_map_revision_->map_revision, first_map_revision)
+      << "Fast-path (no pose shift) snapshot must not trigger a new full rebuild";
+  const std::size_t published_count_after = std::count_if(
+      map_revisions_.begin(), map_revisions_.end(),
+      [](const orb_slam3_msgs::msg::MapRevision& m) {
+        return m.state == orb_slam3_msgs::msg::MapRevision::PUBLISHED;
+      });
+  EXPECT_EQ(published_count_after, published_count_before)
+      << "No new PUBLISHED MapRevision should follow a no-op fast-path snapshot";
+}
+
+TEST_F(MapperNodeTest, PoseShiftGraphSnapshotTriggersFullRebuild) {
+  // The counterpart of the fast-path test: if an existing keyframe pose
+  // shifts (loop closure / GBA correction), the mapper must take the
+  // correction path and produce a new full rebuild.
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("rebuild_only_map", true)});
+  recreateMapper(options);
+  publishWheelBurst(0, 5);
+  spinFlush(mapper_, helper_, 300ms);
+  tracked_pub_->publish(make_tracked(2, orb_slam3_msgs::msg::TrackedFrame::OK,
+                                     true, 0.0, 1, 1, 1));
+  spinFlush(mapper_, helper_, 200ms);
+  scan_pub_->publish(make_scan(2, 2.0f));
+  spinFlush(mapper_, helper_, 300ms);
+
+  const uint64_t rev1 = graph_rev_base_ + 1u;
+  graph_pub_->publish(make_graph(3, rev1, 1, 0.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->committed_scan_count >= 1u;
+  }));
+  const std::uint64_t first_map_revision = last_published_map_revision_->map_revision;
+
+  // Graph #2: same keyframe id but SHIFTED map pose (kf_x moved from 0 to 1).
+  // The correction path must fire a full rebuild → new map_revision.
+  graph_pub_->publish(make_graph(4, rev1 + 1u, 1, 1.0));
+  ASSERT_TRUE(spinUntil2(mapper_, helper_, [this, first_map_revision] {
+    return last_published_map_revision_ &&
+           last_published_map_revision_->map_revision > first_map_revision;
+  }));
+}
+
 TEST_F(MapperNodeTest, DefaultParametersAreDeclaredCorrectly) {
-  EXPECT_EQ(mapper_->get_parameter("odom_topic").as_string(),    "/odom_wheel");
-  EXPECT_EQ(mapper_->get_parameter("scan_topic").as_string(),    "/scan_origin");
-  EXPECT_EQ(mapper_->get_parameter("tracked_frame_topic").as_string(),
+  // Create with true production defaults (no test overrides).
+  auto prod_mapper = std::make_shared<MapperNode>();
+  EXPECT_EQ(prod_mapper->get_parameter("odom_topic").as_string(),    "/odom_wheel");
+  EXPECT_EQ(prod_mapper->get_parameter("scan_topic").as_string(),    "/scan_origin");
+  EXPECT_EQ(prod_mapper->get_parameter("tracked_frame_topic").as_string(),
             "/orb_slam3/tracked_frame");
-  EXPECT_EQ(mapper_->get_parameter("graph_snapshot_topic").as_string(),
+  EXPECT_EQ(prod_mapper->get_parameter("graph_snapshot_topic").as_string(),
             "/orb_slam3/graph_snapshot");
-  EXPECT_EQ(mapper_->get_parameter("tracking_event_topic").as_string(),
+  EXPECT_EQ(prod_mapper->get_parameter("tracking_event_topic").as_string(),
             "/orb_slam3/events");
-  EXPECT_EQ(mapper_->get_parameter("map_topic").as_string(),     "/orb_lidar/map");
-  EXPECT_EQ(mapper_->get_parameter("map_frame").as_string(),     "orb_map");
-  EXPECT_EQ(mapper_->get_parameter("base_frame").as_string(),    "base_link");
-  EXPECT_NEAR(mapper_->get_parameter("wheel_retention_s").as_double(),  300.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
-  EXPECT_EQ(mapper_->get_parameter("imu_topic").as_string(), "/imu");
-  EXPECT_TRUE(mapper_->get_parameter("enable_imu_deskew").as_bool());
-  EXPECT_NEAR(mapper_->get_parameter("imu_retention_s").as_double(), 300.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("imu_max_gap_ms").as_double(), 20.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("usable_range_m").as_double(),       20.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("hit_range_max_m").as_double(), 10.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("hit_log_odds").as_double(), 0.55, 1e-6);
-  EXPECT_NEAR(mapper_->get_parameter("miss_log_odds").as_double(), -0.50, 1e-6);
-  EXPECT_NEAR(mapper_->get_parameter("max_roll_pitch_deg").as_double(),   10.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("max_height_delta_m").as_double(),   0.15, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("max_scan_yaw_change_rad").as_double(), 0.005, 1e-12);
-  EXPECT_NEAR(mapper_->get_parameter("visual_anchor_max_gap_ms").as_double(), 200.0, 1e-9);
-  EXPECT_NEAR(mapper_->get_parameter("pending_scan_timeout_s").as_double(), 2.0, 1e-9);
-  EXPECT_EQ(mapper_->get_parameter("pending_scan_limit").as_int(), 200);
+  EXPECT_EQ(prod_mapper->get_parameter("map_topic").as_string(),     "/orb_lidar/map");
+  EXPECT_EQ(prod_mapper->get_parameter("map_frame").as_string(),     "orb_map");
+  EXPECT_EQ(prod_mapper->get_parameter("base_frame").as_string(),    "base_link");
+  EXPECT_NEAR(prod_mapper->get_parameter("wheel_retention_s").as_double(),  300.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("wheel_max_gap_ms").as_double(),   100.0, 1e-9);
+  EXPECT_EQ(prod_mapper->get_parameter("imu_topic").as_string(), "/imu");
+  EXPECT_TRUE(prod_mapper->get_parameter("enable_imu_deskew").as_bool());
+  EXPECT_NEAR(prod_mapper->get_parameter("imu_retention_s").as_double(), 300.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("imu_max_gap_ms").as_double(), 20.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("resolution_m").as_double(),         0.05, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("usable_range_m").as_double(),       20.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("hit_range_max_m").as_double(), 10.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("hit_log_odds").as_double(), 0.55, 1e-6);
+  EXPECT_NEAR(prod_mapper->get_parameter("miss_log_odds").as_double(), -0.50, 1e-6);
+  EXPECT_NEAR(prod_mapper->get_parameter("max_roll_pitch_deg").as_double(),   10.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("max_height_delta_m").as_double(),   0.15, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("max_scan_yaw_change_rad").as_double(), 0.005, 1e-12);
+  EXPECT_NEAR(prod_mapper->get_parameter("visual_anchor_max_gap_ms").as_double(), 200.0, 1e-9);
+  EXPECT_NEAR(prod_mapper->get_parameter("pending_scan_timeout_s").as_double(), 2.0, 1e-9);
+  EXPECT_EQ(prod_mapper->get_parameter("pending_scan_limit").as_int(), 200);
+  EXPECT_TRUE(prod_mapper->get_parameter("rebuild_only_map").as_bool());
+  EXPECT_NEAR(prod_mapper->get_parameter("map_rebuild_min_interval_s").as_double(), 5.0, 1e-9);
 }
 
 TEST_F(MapperNodeTest, ScanGateParametersRejectInvalidBoundaries) {
